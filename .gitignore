@@ -1,0 +1,8 @@
+.dev
+.env
+bin
+*.out
+target/
+**/*.rs.bk
+Cargo.lock
+.DS_Store
