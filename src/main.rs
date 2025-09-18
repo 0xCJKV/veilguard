@@ -10,6 +10,7 @@ use axum::{
     routing::{get, post, put, delete},
     Router,
 };
+use auth::auth_middleware;
 use config::Config;
 use env_logger::Env;
 use std::sync::Arc;
@@ -47,6 +48,7 @@ async fn main() {
                 .layer(TraceLayer::new_for_http())
                 .layer(CorsLayer::permissive())
                 .layer(Extension(db_pool))
+                .layer(Extension(Arc::new(config)))
         );
 
     // Create the listener
@@ -68,13 +70,20 @@ async fn main() {
 
 fn api_routes() -> Router {
     Router::new()
-        // Auth routes
+        // Auth routes (public)
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
-        // User routes
-        .route("/users", get(routes::users::list_users))
-        .route("/users/{id}", get(routes::users::get_user))
-        .route("/users/{id}", put(routes::users::update_user))
-        .route("/users/{id}", delete(routes::users::delete_user))
-        .route("/users/{id}/profile", get(routes::users::get_user_profile))
+        .route("/auth/refresh", post(routes::auth::refresh_token))
+        .route("/auth/logout", post(routes::auth::logout))
+        // User routes (protected)
+        .nest("/users", user_routes().layer(axum::middleware::from_fn(auth_middleware)))
+}
+
+fn user_routes() -> Router {
+    Router::new()
+        .route("/", get(routes::users::list_users))
+        .route("/{id}", get(routes::users::get_user))
+        .route("/{id}", put(routes::users::update_user))
+        .route("/{id}", delete(routes::users::delete_user))
+        .route("/{id}/profile", get(routes::users::get_user_profile))
 }

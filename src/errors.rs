@@ -27,6 +27,7 @@ pub enum AppError {
     // Authorization errors
     Unauthorized,
     Forbidden,
+    TokenError(String),
     
     // General errors
     InternalServerError(String),
@@ -54,6 +55,7 @@ impl fmt::Display for AppError {
             // Authorization errors
             AppError::Unauthorized => write!(f, "Unauthorized access"),
             AppError::Forbidden => write!(f, "Forbidden access"),
+            AppError::TokenError(msg) => write!(f, "Token error: {}", msg),
             
             // General errors
             AppError::InternalServerError(msg) => write!(f, "Internal server error: {}", msg),
@@ -130,6 +132,15 @@ impl IntoResponse for AppError {
                 "Forbidden access".to_string(),
                 "Access denied".to_string()
             ),
+            AppError::TokenError(msg) => {
+                // Log the actual error for debugging
+                tracing::error!("Token error: {}", msg);
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Token validation failed".to_string(),
+                    "Invalid or expired token".to_string()
+                )
+            },
             
             // General errors
             AppError::InternalServerError(msg) => {

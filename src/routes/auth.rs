@@ -3,9 +3,15 @@ use axum::{
     http::StatusCode,
     response::Json,
 };
+use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 use crate::{
-    auth::{hash_password, verify_password},
+    auth::{
+        hash_password, verify_password, PasetoManager,
+        create_secure_cookie, create_delete_cookie, 
+        ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE
+    },
+    config::Config,
     database::{users, DbPool},
     models::{CreateUserRequest, LoginRequest, UserResponse},
     errors::{AppError, Result},
@@ -58,8 +64,10 @@ pub async fn register(
 
 pub async fn login(
     Extension(pool): Extension<Arc<DbPool>>,
+    Extension(config): Extension<Arc<Config>>,
+    jar: CookieJar,
     Json(login_req): Json<LoginRequest>
-) -> Result<Json<serde_json::Value>> {
+) -> Result<(CookieJar, Json<serde_json::Value>)> {
     // Determine if login is email or username based on presence of '@' symbol
     let user = if login_req.login.contains('@') {
         // Login with email
@@ -88,12 +96,75 @@ pub async fn login(
     let is_valid = verify_password(&login_req.password, &user.password_hash)?;
     
     if is_valid {
+        // Create PASETO manager and generate tokens
+        let paseto_manager = PasetoManager::new(&config)
+            .map_err(|e| AppError::TokenError(format!("Failed to create PASETO manager: {}", e)))?;
+        let user_id = user.id.to_string();
+        
+        let access_token = paseto_manager.generate_access_token(&user_id)
+            .map_err(|e| AppError::TokenError(format!("Failed to generate access token: {}", e)))?;
+        let refresh_token = paseto_manager.generate_refresh_token(&user_id)
+            .map_err(|e| AppError::TokenError(format!("Failed to generate refresh token: {}", e)))?;
+        
+        // Create secure cookies
+        let access_cookie = create_secure_cookie(ACCESS_TOKEN_COOKIE, &access_token, 15 * 60); // 15 minutes
+        let refresh_cookie = create_secure_cookie(REFRESH_TOKEN_COOKIE, &refresh_token, 7 * 24 * 60 * 60); // 7 days
+        
+        // Add cookies to jar
+        let jar = jar.add(access_cookie).add(refresh_cookie);
+        
         let response: UserResponse = user.into();
-        Ok(Json(serde_json::json!({
+        Ok((jar, Json(serde_json::json!({
             "message": "Login successful",
-            "user": response
-        })))
+            "user": response,
+            "tokens": {
+                "access_token": access_token,
+                "refresh_token": refresh_token
+            }
+        }))))
     } else {
         Err(AppError::Unauthorized)
     }
+}
+
+/// Refresh access token using refresh token
+pub async fn refresh_token(
+    Extension(config): Extension<Arc<Config>>,
+    jar: CookieJar,
+) -> Result<(CookieJar, Json<serde_json::Value>)> {
+    // Get refresh token from cookie
+    let refresh_token = jar
+        .get(REFRESH_TOKEN_COOKIE)
+        .map(|cookie| cookie.value().to_string())
+        .ok_or(AppError::Unauthorized)?;
+
+    // Create PASETO manager and validate refresh token
+    let paseto_manager = PasetoManager::new(&config)?;
+    let claims = paseto_manager.validate_token(&refresh_token)?;
+    
+    // Generate new access token
+    let new_access_token = paseto_manager.generate_access_token(&claims.sub)?;
+    
+    // Create new access token cookie
+    let access_cookie = create_secure_cookie(ACCESS_TOKEN_COOKIE, &new_access_token, 15 * 60); // 15 minutes
+    let jar = jar.add(access_cookie);
+    
+    Ok((jar, Json(serde_json::json!({
+        "message": "Token refreshed successfully",
+        "access_token": new_access_token
+    }))))
+}
+
+/// Logout user by clearing authentication cookies
+pub async fn logout(jar: CookieJar) -> Result<(CookieJar, Json<serde_json::Value>)> {
+    // Create delete cookies
+    let delete_access = create_delete_cookie(ACCESS_TOKEN_COOKIE);
+    let delete_refresh = create_delete_cookie(REFRESH_TOKEN_COOKIE);
+    
+    // Add delete cookies to jar
+    let jar = jar.add(delete_access).add(delete_refresh);
+    
+    Ok((jar, Json(serde_json::json!({
+        "message": "Logged out successfully"
+    }))))
 }

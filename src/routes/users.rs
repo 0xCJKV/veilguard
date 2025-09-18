@@ -5,7 +5,7 @@ use axum::{
 };
 use std::sync::Arc;
 use crate::{
-    auth::{hash_password, verify_password},
+    auth::{AuthUser, hash_password, verify_password},
     database::{users, DbPool},
     models::{UserResponse, UpdateUserRequest},
     errors::{AppError, Result},
@@ -20,9 +20,18 @@ pub struct PaginationQuery {
 
 // GET /api/v1/users/{id}
 pub async fn get_user(
+    Extension(auth_user): Extension<AuthUser>,
     Extension(pool): Extension<Arc<DbPool>>,
     Path(user_id): Path<i32>
 ) -> Result<Json<UserResponse>> {
+    // Users can only view their own profile, unless they're admin
+    let requesting_user_id: i32 = auth_user.user_id.parse()
+        .map_err(|_| AppError::TokenError("Invalid user ID in token".to_string()))?;
+    
+    if requesting_user_id != user_id && !auth_user.has_role("admin") {
+        return Err(AppError::Forbidden);
+    }
+
     match users::find_by_id(&pool, user_id).await {
         Ok(Some(user)) => {
             let response: UserResponse = user.into();
@@ -37,9 +46,14 @@ pub async fn get_user(
 
 // GET /api/v1/users
 pub async fn list_users(
+    Extension(auth_user): Extension<AuthUser>,
     Extension(pool): Extension<Arc<DbPool>>,
     Query(query): Query<PaginationQuery>
 ) -> Result<Json<serde_json::Value>> {
+    // Only allow admins to list all users
+    if !auth_user.has_role("admin") {
+        return Err(AppError::Forbidden);
+    }
     let page = query.page.unwrap_or(1);
     let limit = query.limit.unwrap_or(10).min(100);
     let offset = (page - 1) * limit;
@@ -64,10 +78,18 @@ pub async fn list_users(
 
 // PUT /api/v1/users/{id}
 pub async fn update_user(
+    Extension(auth_user): Extension<AuthUser>,
     Extension(pool): Extension<Arc<DbPool>>,
     Path(user_id): Path<i32>,
     Json(update_req): Json<UpdateUserRequest>
 ) -> Result<Json<UserResponse>> {
+    // Users can only update their own profile, unless they're admin
+    let requesting_user_id: i32 = auth_user.user_id.parse()
+        .map_err(|_| AppError::TokenError("Invalid user ID in token".to_string()))?;
+    
+    if requesting_user_id != user_id && !auth_user.has_role("admin") {
+        return Err(AppError::Forbidden);
+    }
     // First, get the current user
     let current_user = match users::find_by_id(&pool, user_id).await {
         Ok(Some(user)) => user,
@@ -135,9 +157,14 @@ pub async fn update_user(
 
 // DELETE /api/v1/users/{id}
 pub async fn delete_user(
+    Extension(auth_user): Extension<AuthUser>,
     Extension(pool): Extension<Arc<DbPool>>,
     Path(user_id): Path<i32>
 ) -> Result<StatusCode> {
+    // Only admins can delete users
+    if !auth_user.has_role("admin") {
+        return Err(AppError::Forbidden);
+    }
     match users::delete_user(&pool, user_id).await {
         Ok(true) => Ok(StatusCode::NO_CONTENT),
         Ok(false) => Err(AppError::user_not_found(user_id)),
@@ -149,9 +176,17 @@ pub async fn delete_user(
 
 // GET /api/v1/users/{id}/profile
 pub async fn get_user_profile(
+    Extension(auth_user): Extension<AuthUser>,
     Extension(pool): Extension<Arc<DbPool>>,
     Path(user_id): Path<i32>
 ) -> Result<Json<serde_json::Value>> {
+    // Users can only view their own profile, unless they're admin
+    let requesting_user_id: i32 = auth_user.user_id.parse()
+        .map_err(|_| AppError::TokenError("Invalid user ID in token".to_string()))?;
+    
+    if requesting_user_id != user_id && !auth_user.has_role("admin") {
+        return Err(AppError::Forbidden);
+    }
     match users::find_by_id(&pool, user_id).await {
         Ok(Some(user)) => {
             let profile = serde_json::json!({
