@@ -1,9 +1,14 @@
-use actix_web::{web, HttpResponse, Result};
+use axum::{
+    extract::{Extension, Path, Query},
+    http::StatusCode,
+    response::Json,
+};
+use std::sync::Arc;
 use crate::{
     auth::{hash_password, verify_password},
     database::{users, DbPool},
     models::{UserResponse, UpdateUserRequest},
-    errors::AppError,
+    errors::{AppError, Result},
 };
 use serde::Deserialize;
 
@@ -15,29 +20,26 @@ pub struct PaginationQuery {
 
 // GET /api/v1/users/{id}
 pub async fn get_user(
-    pool: web::Data<DbPool>,
-    path: web::Path<i32>
-) -> Result<HttpResponse> {
-    let user_id = path.into_inner();
-    
+    Extension(pool): Extension<Arc<DbPool>>,
+    Path(user_id): Path<i32>
+) -> Result<Json<UserResponse>> {
     match users::find_by_id(&pool, user_id).await {
         Ok(Some(user)) => {
             let response: UserResponse = user.into();
-            Ok(HttpResponse::Ok().json(response))
+            Ok(Json(response))
         },
-        Ok(None) => Ok(HttpResponse::NotFound().json("User not found")),
+        Ok(None) => Err(AppError::user_not_found(user_id)),
         Err(e) => {
-            log::error!("Database error fetching user {}: {}", user_id, e);
-            Ok(HttpResponse::InternalServerError().json("Failed to fetch user"))
+            Err(AppError::database(format!("Database error fetching user {}: {}", user_id, e)))
         }
     }
 }
 
 // GET /api/v1/users
 pub async fn list_users(
-    pool: web::Data<DbPool>,
-    query: web::Query<PaginationQuery>
-) -> Result<HttpResponse> {
+    Extension(pool): Extension<Arc<DbPool>>,
+    Query(query): Query<PaginationQuery>
+) -> Result<Json<serde_json::Value>> {
     let page = query.page.unwrap_or(1);
     let limit = query.limit.unwrap_or(10).min(100);
     let offset = (page - 1) * limit;
@@ -45,7 +47,7 @@ pub async fn list_users(
     match users::list_users(&pool, limit, offset).await {
         Ok(user_list) => {
             let responses: Vec<UserResponse> = user_list.into_iter().map(|u| u.into()).collect();
-            Ok(HttpResponse::Ok().json(serde_json::json!({
+            Ok(Json(serde_json::json!({
                 "users": responses,
                 "pagination": {
                     "page": page,
@@ -55,27 +57,23 @@ pub async fn list_users(
             })))
         },
         Err(e) => {
-            log::error!("Database error listing users: {}", e);
-            Ok(HttpResponse::InternalServerError().json("Failed to fetch users"))
+            Err(AppError::database(format!("Database error listing users: {}", e)))
         }
     }
 }
 
 // PUT /api/v1/users/{id}
 pub async fn update_user(
-    pool: web::Data<DbPool>,
-    path: web::Path<i32>,
-    update_req: web::Json<UpdateUserRequest>
-) -> Result<HttpResponse> {
-    let user_id = path.into_inner();
-    
+    Extension(pool): Extension<Arc<DbPool>>,
+    Path(user_id): Path<i32>,
+    Json(update_req): Json<UpdateUserRequest>
+) -> Result<Json<UserResponse>> {
     // First, get the current user
     let current_user = match users::find_by_id(&pool, user_id).await {
         Ok(Some(user)) => user,
-        Ok(None) => return Ok(HttpResponse::NotFound().json("User not found")),
+        Ok(None) => return Err(AppError::user_not_found(user_id)),
         Err(e) => {
-            log::error!("Database error fetching user {}: {}", user_id, e);
-            return Ok(HttpResponse::InternalServerError().json("Failed to fetch user"));
+            return Err(AppError::database(format!("Database error fetching user {}: {}", user_id, e)));
         }
     };
     
@@ -83,15 +81,13 @@ pub async fn update_user(
     
     // Handle password change if requested
     if let (Some(current_pw), Some(new_pw)) = (&update_req.current_password, &update_req.new_password) {
-        let is_valid = verify_password(current_pw, &current_user.password_hash)
-            .map_err(|e| AppError::ValidationError(e.to_string()))?;
+        let is_valid = verify_password(current_pw, &current_user.password_hash)?;
         
         if !is_valid {
-            return Ok(HttpResponse::BadRequest().json("Current password is incorrect"));
+            return Err(AppError::bad_request("Current password is incorrect"));
         }
         
-        let new_hash = hash_password(new_pw)
-            .map_err(|e| AppError::ValidationError(e.to_string()))?;
+        let new_hash = hash_password(new_pw)?;
         
         new_password_hash = Some(new_hash);
     }
@@ -99,13 +95,13 @@ pub async fn update_user(
     // Validate email format if provided
     if let Some(email) = &update_req.email {
         if !email.contains('@') || email.len() < 5 {
-            return Ok(HttpResponse::BadRequest().json("Invalid email format"));
+            return Err(AppError::invalid_email(email));
         }
         
         // Check if email is already taken by another user
         if let Ok(Some(existing_user)) = users::find_by_email(&pool, email).await {
             if existing_user.id != user_id {
-                return Ok(HttpResponse::BadRequest().json("Email already in use"));
+                return Err(AppError::user_exists(email));
             }
         }
     }
@@ -113,13 +109,13 @@ pub async fn update_user(
     // Validate username if provided
     if let Some(username) = &update_req.username {
         if username.len() < 3 || username.len() > 50 {
-            return Ok(HttpResponse::BadRequest().json("Username must be between 3 and 50 characters"));
+            return Err(AppError::validation("Username must be between 3 and 50 characters"));
         }
         
         // Check if username is already taken by another user
         if let Ok(Some(existing_user)) = users::find_by_username(&pool, username).await {
             if existing_user.id != user_id {
-                return Ok(HttpResponse::BadRequest().json("Username already taken"));
+                return Err(AppError::user_exists(username));
             }
         }
     }
@@ -128,40 +124,34 @@ pub async fn update_user(
     match users::update_user(&pool, user_id, &update_req, new_password_hash.as_deref()).await {
         Ok(Some(updated_user)) => {
             let response: UserResponse = updated_user.into();
-            Ok(HttpResponse::Ok().json(response))
+            Ok(Json(response))
         },
-        Ok(None) => Ok(HttpResponse::NotFound().json("User not found")),
+        Ok(None) => Err(AppError::user_not_found(user_id)),
         Err(e) => {
-            log::error!("Database error updating user {}: {}", user_id, e);
-            Ok(HttpResponse::InternalServerError().json("Failed to update user"))
+            Err(AppError::database(format!("Database error updating user {}: {}", user_id, e)))
         }
     }
 }
 
 // DELETE /api/v1/users/{id}
 pub async fn delete_user(
-    pool: web::Data<DbPool>,
-    path: web::Path<i32>
-) -> Result<HttpResponse> {
-    let user_id = path.into_inner();
-    
+    Extension(pool): Extension<Arc<DbPool>>,
+    Path(user_id): Path<i32>
+) -> Result<StatusCode> {
     match users::delete_user(&pool, user_id).await {
-        Ok(true) => Ok(HttpResponse::NoContent().finish()),
-        Ok(false) => Ok(HttpResponse::NotFound().json("User not found")),
+        Ok(true) => Ok(StatusCode::NO_CONTENT),
+        Ok(false) => Err(AppError::user_not_found(user_id)),
         Err(e) => {
-            log::error!("Database error deleting user {}: {}", user_id, e);
-            Ok(HttpResponse::InternalServerError().json("Failed to delete user"))
+            Err(AppError::database(format!("Database error deleting user {}: {}", user_id, e)))
         }
     }
 }
 
 // GET /api/v1/users/{id}/profile
 pub async fn get_user_profile(
-    pool: web::Data<DbPool>,
-    path: web::Path<i32>
-) -> Result<HttpResponse> {
-    let user_id = path.into_inner();
-    
+    Extension(pool): Extension<Arc<DbPool>>,
+    Path(user_id): Path<i32>
+) -> Result<Json<serde_json::Value>> {
     match users::find_by_id(&pool, user_id).await {
         Ok(Some(user)) => {
             let profile = serde_json::json!({
@@ -178,24 +168,11 @@ pub async fn get_user_profile(
                 }
             });
             
-            Ok(HttpResponse::Ok().json(profile))
+            Ok(Json(profile))
         },
-        Ok(None) => Ok(HttpResponse::NotFound().json("User not found")),
+        Ok(None) => Err(AppError::user_not_found(user_id)),
         Err(e) => {
-            log::error!("Database error fetching user profile {}: {}", user_id, e);
-            Ok(HttpResponse::InternalServerError().json("Failed to fetch user profile"))
+            Err(AppError::database(format!("Database error fetching user profile {}: {}", user_id, e)))
         }
     }
-}
-
-// Configure routes
-pub fn config(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/users")
-            .route("", web::get().to(list_users))
-            .route("/{id}", web::get().to(get_user))
-            .route("/{id}", web::put().to(update_user))
-            .route("/{id}", web::delete().to(delete_user))
-            .route("/{id}/profile", web::get().to(get_user_profile))
-    );
 }

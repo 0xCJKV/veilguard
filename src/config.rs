@@ -30,15 +30,15 @@ impl Config {
         }
     }
 
-    // Smart RUST_LOG construction
+    // Smart RUST_LOG construction for Axum and tracing
     pub fn rust_log(&self) -> String {
         match self.log_level.to_lowercase().as_str() {
-            "trace" => "trace,actix_web=trace,veilguard=trace".to_string(),
-            "debug" => "debug,actix_web=debug,veilguard=debug".to_string(),
-            "info" => "info,actix_web=info,veilguard=info".to_string(),
-            "warn" => "warn,actix_web=warn,veilguard=warn".to_string(),
-            "error" => "error,actix_web=error,veilguard=error".to_string(),
-            _ => "info,actix_web=info,veilguard=info".to_string(), // fallback
+            "trace" => "trace,axum=trace,tower=trace,hyper=trace,veilguard=trace".to_string(),
+            "debug" => "debug,axum=debug,tower=debug,hyper=debug,veilguard=debug".to_string(),
+            "info" => "info,axum=info,tower=info,hyper=info,veilguard=info".to_string(),
+            "warn" => "warn,axum=warn,tower=warn,hyper=warn,veilguard=warn".to_string(),
+            "error" => "error,axum=error,tower=error,hyper=error,veilguard=error".to_string(),
+            _ => "info,axum=info,tower=info,hyper=info,veilguard=info".to_string(), // fallback
         }
     }
 }

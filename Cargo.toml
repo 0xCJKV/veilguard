@@ -4,8 +4,8 @@ version = "0.2.0"
 edition = "2024"
 
 [dependencies]
-actix-web = "4.11.0"
 argon2 = { version = "0.5.3", features = ["std", "rand"] }
+axum = { version = "0.8.4", features = ["json", "macros", "tower-log"] }
 chrono = { version = "0.4.42", features = ["serde"] }
 dotenvy = "0.15.7"
 env_logger = "0.11.8"
@@ -14,3 +14,6 @@ serde = { version = "1.0.225", features = ["derive"] }
 serde_json = "1.0.145"
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid"] }
 tokio = { version = "1.47.1", features = ["full"] }
+tower = "0.5.2"
+tower-http = { version = "0.6.6", features = ["trace", "cors"] }
+tracing = "0.1.41"
