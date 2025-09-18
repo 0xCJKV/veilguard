@@ -1,10 +1,11 @@
 use axum::{
     extract::Extension,
-    http::StatusCode,
-    response::Json,
+    http::{StatusCode, HeaderMap},
+    response::{Json, Html, Response, IntoResponse, Redirect},
 };
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
+use minijinja::{Environment, context};
 use crate::{
     auth::{
         hash_password, verify_password, PasetoManager,
@@ -25,10 +26,26 @@ fn is_valid_email(email: &str) -> bool {
     !email.ends_with('@')
 }
 
+pub fn is_htmx_request(headers: &HeaderMap) -> bool {
+    headers.get("HX-Request").is_some()
+}
+
+pub fn render_notification(env: &Environment<'static>, message: &str, notification_type: &str) -> std::result::Result<String, AppError> {
+    let template = env.get_template("components/notification.html")
+        .map_err(|e| AppError::TemplateError(format!("Failed to load notification template: {}", e)))?;
+    
+    template.render(context! {
+        message => message,
+        notification_type => notification_type
+    }).map_err(|e| AppError::TemplateError(format!("Failed to render notification: {}", e)))
+}
+
 pub async fn register(
     Extension(pool): Extension<Arc<DbPool>>,
+    Extension(env): Extension<Arc<Environment<'static>>>,
+    headers: HeaderMap,
     Json(user_req): Json<CreateUserRequest>
-) -> Result<(StatusCode, Json<UserResponse>)> {
+) -> Result<Response> {
     if !is_valid_email(&user_req.email) {
         return Err(AppError::invalid_email(&user_req.email));
     }
@@ -53,8 +70,13 @@ pub async fn register(
     
     match users::create_user(&pool, &user_req, &password_hash).await {
         Ok(user) => {
-            let response: UserResponse = user.into();
-            Ok((StatusCode::CREATED, Json(response)))
+            if is_htmx_request(&headers) {
+                let notification_html = render_notification(&env, "Registration successful! Please log in.", "success")?;
+                Ok(Html(notification_html).into_response())
+            } else {
+                let response: UserResponse = user.into();
+                Ok((StatusCode::CREATED, Json(response)).into_response())
+            }
         },
         Err(e) => {
             Err(AppError::database(format!("Failed to create user: {}", e)))
@@ -65,9 +87,11 @@ pub async fn register(
 pub async fn login(
     Extension(pool): Extension<Arc<DbPool>>,
     Extension(config): Extension<Arc<Config>>,
+    Extension(env): Extension<Arc<Environment<'static>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(login_req): Json<LoginRequest>
-) -> Result<(CookieJar, Json<serde_json::Value>)> {
+) -> Result<Response> {
     // Determine if login is email or username based on presence of '@' symbol
     let user = if login_req.login.contains('@') {
         // Login with email
@@ -113,15 +137,30 @@ pub async fn login(
         // Add cookies to jar
         let jar = jar.add(access_cookie).add(refresh_cookie);
         
-        let response: UserResponse = user.into();
-        Ok((jar, Json(serde_json::json!({
-            "message": "Login successful",
-            "user": response,
-            "tokens": {
-                "access_token": access_token,
-                "refresh_token": refresh_token
+        if is_htmx_request(&headers) {
+            // For HTMX requests, redirect to dashboard
+            let mut response = Redirect::to("/dashboard").into_response();
+            
+            // Add cookies to the response
+            let headers = response.headers_mut();
+            for cookie in jar.iter() {
+                if let Ok(header_value) = cookie.to_string().parse() {
+                    headers.append("set-cookie", header_value);
+                }
             }
-        }))))
+            
+            Ok(response)
+        } else {
+            let response: UserResponse = user.into();
+            Ok((jar, Json(serde_json::json!({
+                "message": "Login successful",
+                "user": response,
+                "tokens": {
+                    "access_token": access_token,
+                    "refresh_token": refresh_token
+                }
+            }))).into_response())
+        }
     } else {
         Err(AppError::Unauthorized)
     }

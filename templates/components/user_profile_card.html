@@ -1,0 +1,30 @@
+<div class="dashboard-card" id="user-profile-card">
+    <div class="card-header">
+        <h3><i class="fas fa-user"></i> Profile Information</h3>
+    </div>
+    <div class="card-content">
+        <div class="profile-info">
+            <div class="info-item">
+                <label>Username:</label>
+                <span>{{ user.username }}</span>
+            </div>
+            <div class="info-item">
+                <label>Email:</label>
+                <span>{{ user.email }}</span>
+            </div>
+            <div class="info-item">
+                <label>Member Since:</label>
+                <span>{{ user.created_at | date }}</span>
+            </div>
+            <div class="info-item">
+                <label>Last Updated:</label>
+                <span>{{ user.updated_at | date }}</span>
+            </div>
+        </div>
+    </div>
+    <div class="card-actions">
+        <button class="btn btn-primary" onclick="editProfile()">
+            <i class="fas fa-edit"></i> Edit Profile
+        </button>
+    </div>
+</div>

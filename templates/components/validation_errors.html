@@ -1,0 +1,60 @@
+<div class="validation-errors" id="validation-errors">
+    {% if errors %}
+        <div class="notification notification-error" style="display: block;">
+            <div class="notification-content">
+                <i class="fas fa-exclamation-circle"></i>
+                <div class="error-details">
+                    <strong>Please correct the following errors:</strong>
+                    <ul class="error-list">
+                        {% for error in errors %}
+                            <li data-field="{{ error.field }}" data-code="{{ error.code }}">
+                                {{ error.message }}
+                            </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+            <button class="notification-close" onclick="this.parentElement.style.display='none'">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        
+        <script>
+            // Highlight form fields with errors
+            document.addEventListener('DOMContentLoaded', function() {
+                // Get error data from data attributes
+                const errorElements = document.querySelectorAll('[data-field][data-code]');
+                errorElements.forEach(errorElement => {
+                    const fieldName = errorElement.getAttribute('data-field');
+                    const errorMessage = errorElement.textContent.trim();
+                    
+                    const field = document.querySelector(`[name="${fieldName}"]`);
+                    if (field) {
+                        field.classList.add('error');
+                        field.setAttribute('aria-invalid', 'true');
+                        
+                        // Add error message near the field
+                        const existingError = field.parentNode.querySelector('.field-error');
+                        if (existingError) {
+                            existingError.remove();
+                        }
+                        
+                        const errorSpan = document.createElement('span');
+                        errorSpan.className = 'field-error';
+                        errorSpan.textContent = errorMessage;
+                        errorSpan.setAttribute('role', 'alert');
+                        field.parentNode.appendChild(errorSpan);
+                    }
+                });
+            });
+            
+            // Auto-hide notification after 10 seconds
+            setTimeout(() => {
+                const notification = document.querySelector('.validation-errors .notification');
+                if (notification) {
+                    notification.style.display = 'none';
+                }
+            }, 10000);
+        </script>
+    {% endif %}
+</div>

@@ -29,6 +29,9 @@ pub enum AppError {
     Forbidden,
     TokenError(String),
     
+    // Template errors
+    TemplateError(String),
+    
     // General errors
     InternalServerError(String),
     BadRequest(String),
@@ -56,6 +59,9 @@ impl fmt::Display for AppError {
             AppError::Unauthorized => write!(f, "Unauthorized access"),
             AppError::Forbidden => write!(f, "Forbidden access"),
             AppError::TokenError(msg) => write!(f, "Token error: {}", msg),
+            
+            // Template errors
+            AppError::TemplateError(msg) => write!(f, "Template error: {}", msg),
             
             // General errors
             AppError::InternalServerError(msg) => write!(f, "Internal server error: {}", msg),
@@ -139,6 +145,17 @@ impl IntoResponse for AppError {
                     StatusCode::UNAUTHORIZED,
                     "Token validation failed".to_string(),
                     "Invalid or expired token".to_string()
+                )
+            },
+            
+            // Template errors
+            AppError::TemplateError(msg) => {
+                // Log the actual error for debugging
+                tracing::error!("Template error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Template rendering failed".to_string(),
+                    "Internal server error".to_string()
                 )
             },
             

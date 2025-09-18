@@ -1,0 +1,244 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - VeilGuard{% endblock %}
+
+{% block content %}
+<section class="dashboard">
+    <div class="container">
+        <div class="dashboard-header">
+            <h1>
+                <i class="fas fa-tachometer-alt"></i>
+                Welcome back, {{ user.username }}!
+            </h1>
+            <p class="dashboard-subtitle">Manage your account and security settings</p>
+        </div>
+
+        <div class="dashboard-grid">
+            {% include "components/user_profile_card.html" %}
+
+            <div class="dashboard-card">
+                <div class="card-header">
+                    <h3><i class="fas fa-shield-alt"></i> Security</h3>
+                </div>
+                <div class="card-content">
+                    <div class="security-item">
+                        <div class="security-info">
+                            <h4>Password</h4>
+                            <p>Last changed: {{ user.updated_at | date }}</p>
+                        </div>
+                        <button class="btn btn-outline" onclick="changePassword()">
+                            <i class="fas fa-key"></i> Change
+                        </button>
+                    </div>
+                    <div class="security-item">
+                        <div class="security-info">
+                            <h4>Two-Factor Authentication</h4>
+                            <p>Status: <span class="status-badge disabled">Disabled</span></p>
+                        </div>
+                        <button class="btn btn-outline" onclick="setup2FA()">
+                            <i class="fas fa-mobile-alt"></i> Setup
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="dashboard-card">
+                <div class="card-header">
+                    <h3><i class="fas fa-chart-line"></i> Activity</h3>
+                </div>
+                <div class="card-content">
+                    <div class="activity-item">
+                        <div class="activity-icon">
+                            <i class="fas fa-sign-in-alt"></i>
+                        </div>
+                        <div class="activity-info">
+                            <h4>Recent Login</h4>
+                            <p>{{ user.updated_at | date }} from your current device</p>
+                        </div>
+                    </div>
+                    <div class="activity-item">
+                        <div class="activity-icon">
+                            <i class="fas fa-user-plus"></i>
+                        </div>
+                        <div class="activity-info">
+                            <h4>Account Created</h4>
+                            <p>{{ user.created_at | date }}</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-actions">
+                    <button class="btn btn-secondary" onclick="viewFullActivity()">
+                        <i class="fas fa-history"></i> View All Activity
+                    </button>
+                </div>
+            </div>
+
+            <div class="dashboard-card danger-zone">
+                <div class="card-header">
+                    <h3><i class="fas fa-exclamation-triangle"></i> Danger Zone</h3>
+                </div>
+                <div class="card-content">
+                    <p>Once you delete your account, there is no going back. Please be certain.</p>
+                </div>
+                <div class="card-actions">
+                    <button class="btn btn-danger" onclick="deleteAccount()">
+                        <i class="fas fa-trash"></i> Delete Account
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Notification Container for HTMX responses -->
+<div id="notification-container"></div>
+
+<!-- Modals -->
+<div id="editProfileModal" class="modal hidden">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Edit Profile</h3>
+            <button class="modal-close" onclick="closeModal('editProfileModal')">
+                <i class="fas fa-times"></i>
+            </button>
+        </div>
+        <form hx-put="/api/v1/users/{{ user.id }}" 
+              hx-ext="json-enc"
+              hx-target="#notification-container"
+              hx-swap="innerHTML"
+              hx-on::after-request="if(event.detail.successful) { 
+                closeModal('editProfileModal'); 
+                htmx.ajax('GET', '/api/v1/users/{{ user.id }}/profile-card', {target: '#user-profile-card', swap: 'outerHTML'});
+              }">
+            <div class="form-group">
+                <label for="editUsername">Username</label>
+                <input type="text" id="editUsername" name="username" value="{{ user.username }}" 
+                       data-validate="username" autocomplete="username" required>
+            </div>
+            <div class="form-group">
+                <label for="editEmail">Email</label>
+                <input type="email" id="editEmail" name="email" value="{{ user.email }}" 
+                       data-validate="email" autocomplete="email" required>
+            </div>
+            <div class="modal-actions">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('editProfileModal')">Cancel</button>
+                <button type="submit" class="btn btn-primary">Save Changes</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+
+{% endblock %}
+
+{% block styles %}
+<style>
+/* Validation Styles */
+.validation-errors {
+    background: #fee;
+    border: 1px solid #fcc;
+    border-radius: 8px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+    animation: slideDown 0.3s ease-out;
+}
+
+.error-message {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #c53030;
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+}
+
+.error-message:last-child {
+    margin-bottom: 0;
+}
+
+.error-icon {
+    font-size: 1rem;
+}
+
+.field-error {
+    color: #c53030;
+    font-size: 0.8rem;
+    margin-top: 0.25rem;
+    display: none;
+}
+
+.form-group input.error,
+.form-group textarea.error {
+    border-color: #c53030;
+    box-shadow: 0 0 0 3px rgba(197, 48, 48, 0.1);
+}
+
+.rate-limit {
+    background: #fff3cd;
+    border: 1px solid #ffeaa7;
+    color: #856404;
+    padding: 0.75rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Success feedback */
+.success-message {
+    background: #d4edda;
+    border: 1px solid #c3e6cb;
+    color: #155724;
+    padding: 0.75rem;
+    border-radius: 6px;
+    margin-bottom: 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+</style>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/validation.js"></script>
+<script>
+function editProfile() {
+    document.getElementById('editProfileModal').classList.remove('hidden');
+}
+
+function closeModal(modalId) {
+    document.getElementById(modalId).classList.add('hidden');
+}
+
+function changePassword() {
+    // TODO: Implement HTMX-powered password change
+    alert('Password change feature coming soon!');
+}
+
+function setup2FA() {
+    // TODO: Implement HTMX-powered 2FA setup
+    alert('Two-factor authentication setup coming soon!');
+}
+
+function viewFullActivity() {
+    // TODO: Implement HTMX-powered activity log
+    alert('Full activity log coming soon!');
+}
+
+function deleteAccount() {
+    if (confirm('Are you sure you want to delete your account? This action cannot be undone.')) {
+        // TODO: Implement HTMX-powered account deletion
+        alert('Account deletion feature coming soon!');
+    }
+}
+</script>
+{% endblock %}

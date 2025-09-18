@@ -57,6 +57,7 @@ pub async fn auth_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, AppError> {
+
     // Create PASETO manager
     let paseto_manager = PasetoManager::new(&config)?;
 
@@ -110,6 +111,47 @@ pub async fn auth_middleware(
             Err(AppError::Unauthorized)
         }
     }
+}
+
+/// Optional authentication middleware that doesn't reject unauthenticated requests
+pub async fn optional_auth_middleware(
+    Extension(config): Extension<Arc<Config>>,
+    jar: CookieJar,
+    mut request: Request,
+    next: Next,
+) -> Response {
+
+    // Create PASETO manager
+    let paseto_manager = match PasetoManager::new(&config) {
+        Ok(manager) => manager,
+        Err(_) => return next.run(request).await,
+    };
+
+    // Try to get access token from cookie
+    let access_token = jar
+        .get(ACCESS_TOKEN_COOKIE)
+        .map(|cookie| cookie.value().to_string());
+
+    let auth_user = match access_token {
+        Some(token) => {
+            // Validate the access token
+            match paseto_manager.validate_token(&token) {
+                Ok(claims) => {
+                    let user_id = claims.sub.clone();
+                    Some(AuthUser::new(user_id, claims))
+                }
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
+
+    // Insert the optional authenticated user into request extensions
+    if let Some(user) = auth_user {
+        request.extensions_mut().insert(user);
+    }
+
+    next.run(request).await
 }
 
 /// Helper function to create secure cookie attributes

@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}VeilGuard - Secure Authentication{% endblock %}
+
+{% block content %}
+<section class="hero">
+    <div class="hero-content">
+        <h1 class="hero-title">
+            <i class="fas fa-shield-alt"></i>
+            Secure Authentication Made Simple
+        </h1>
+        <p class="hero-subtitle">
+            VeilGuard provides enterprise-grade authentication with modern security practices.
+            Protect your applications with confidence.
+        </p>
+        <div class="hero-actions">
+            <a href="/register" class="btn btn-primary btn-large">
+                <i class="fas fa-user-plus"></i>
+                Get Started
+            </a>
+            <a href="/login" class="btn btn-secondary btn-large">
+                <i class="fas fa-sign-in-alt"></i>
+                Sign In
+            </a>
+        </div>
+    </div>
+</section>
+
+<section class="features">
+    <div class="container">
+        <h2 class="section-title">Why Choose VeilGuard?</h2>
+        <div class="features-grid">
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-lock"></i>
+                </div>
+                <h3>Secure by Design</h3>
+                <p>Built with modern cryptographic standards including Argon2 password hashing and PASETO tokens.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-bolt"></i>
+                </div>
+                <h3>High Performance</h3>
+                <p>Powered by Rust and Axum for blazing fast response times and minimal resource usage.</p>
+            </div>
+            <div class="feature-card">
+                <div class="feature-icon">
+                    <i class="fas fa-cogs"></i>
+                </div>
+                <h3>Easy Integration</h3>
+                <p>RESTful API design makes it simple to integrate with any frontend framework or application.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<section class="cta">
+    <div class="container">
+        <h2>Ready to Secure Your Application?</h2>
+        <p>Join thousands of developers who trust VeilGuard for their authentication needs.</p>
+        <a href="/register" class="btn btn-primary btn-large">
+            Start Free Trial
+        </a>
+    </div>
+</section>
+{% endblock %}

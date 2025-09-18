@@ -1,0 +1,20 @@
+<div class="form-group">
+    <label for="{{ id }}">{{ label }}{% if required %} *{% endif %}</label>
+    <input 
+        type="{{ type | default('text') }}" 
+        id="{{ id }}" 
+        name="{{ name | default(id) }}" 
+        value="{{ value | default('') }}"
+        {% if placeholder %}placeholder="{{ placeholder }}"{% endif %}
+        {% if required %}required{% endif %}
+        {% if readonly %}readonly{% endif %}
+        {% if disabled %}disabled{% endif %}
+        class="form-input{% if error %} error{% endif %}"
+    >
+    {% if error %}
+        <span class="error-message">{{ error }}</span>
+    {% endif %}
+    {% if help_text %}
+        <span class="help-text">{{ help_text }}</span>
+    {% endif %}
+</div>

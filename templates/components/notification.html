@@ -1,0 +1,19 @@
+<!-- Notification Component for HTMX responses -->
+<div id="notification" class="notification {{ notification_type }}" hx-swap-oob="true">
+    <div class="notification-content">
+        <span id="notificationMessage">{{ message }}</span>
+        <button onclick="hideNotification()" class="notification-close">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+</div>
+
+<script>
+// Auto-hide notification after 5 seconds
+setTimeout(() => {
+    const notification = document.getElementById('notification');
+    if (notification) {
+        notification.classList.add('hidden');
+    }
+}, 5000);
+</script>

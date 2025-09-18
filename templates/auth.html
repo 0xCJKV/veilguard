@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+
+{% block title %}{% if is_register %}Sign Up{% else %}Sign In{% endif %} - VeilGuard{% endblock %}
+
+{% block content %}
+<section class="auth-section">
+    <div class="auth-container">
+        <div class="auth-card">
+            <div class="auth-header">
+                <i class="fas fa-shield-alt"></i>
+                <h1>{% if is_register %}Create Account{% else %}Welcome Back{% endif %}</h1>
+                <p>{% if is_register %}Join VeilGuard today{% else %}Sign in to your account{% endif %}</p>
+            </div>
+
+            <form class="auth-form" id="authForm"
+                  data-is-register="{% if is_register %}true{% else %}false{% endif %}"
+                  hx-post="{% if is_register %}/api/v1/auth/register{% else %}/api/v1/auth/login{% endif %}"
+                  hx-ext="json-enc"
+                  hx-target="#notification"
+                  hx-swap="outerHTML"
+                  hx-indicator="#loading-indicator">
+                {% if is_register %}
+                <div class="form-group">
+                    <label for="username">Username</label>
+                    <div class="input-group">
+                        <i class="fas fa-user"></i>
+                        <input type="text" id="username" name="username" required 
+                               placeholder="Choose a username" autocomplete="username">
+                    </div>
+                </div>
+                {% endif %}
+
+                <div class="form-group">
+                    <label for="{% if is_register %}email{% else %}login{% endif %}">{% if is_register %}Email{% else %}Email or Username{% endif %}</label>
+                    <div class="input-group">
+                        <i class="fas fa-{% if is_register %}envelope{% else %}user{% endif %}"></i>
+                        <input type="{% if is_register %}email{% else %}text{% endif %}" id="{% if is_register %}email{% else %}login{% endif %}" name="{% if is_register %}email{% else %}login{% endif %}" required 
+                               placeholder="{% if is_register %}Enter your email{% else %}Enter your email or username{% endif %}" autocomplete="{% if is_register %}email{% else %}username{% endif %}">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label for="password">Password</label>
+                    <div class="input-group">
+                        <i class="fas fa-lock"></i>
+                        <input type="password" id="password" name="password" required 
+                               placeholder="Enter your password" autocomplete="{% if is_register %}new-password{% else %}current-password{% endif %}">
+                        <button type="button" class="password-toggle" onclick="togglePassword()">
+                            <i class="fas fa-eye" id="passwordToggleIcon"></i>
+                        </button>
+                    </div>
+                </div>
+
+                {% if is_register %}
+                <div class="form-group">
+                    <label for="confirmPassword">Confirm Password</label>
+                    <div class="input-group">
+                        <i class="fas fa-lock"></i>
+                        <input type="password" id="confirmPassword" name="confirmPassword" required 
+                               placeholder="Confirm your password" autocomplete="new-password">
+                    </div>
+                </div>
+                {% endif %}
+
+                <button type="submit" class="btn btn-primary btn-full">
+                    <i class="fas fa-{% if is_register %}user-plus{% else %}sign-in-alt{% endif %}"></i>
+                    <span class="button-text">{% if is_register %}Create Account{% else %}Sign In{% endif %}</span>
+                    <span id="loading-indicator" class="htmx-indicator">
+                        <i class="fas fa-spinner fa-spin"></i> Processing...
+                    </span>
+                </button>
+            </form>
+
+            <div class="auth-footer">
+                {% if is_register %}
+                    <p>Already have an account? <a href="/login">Sign in here</a></p>
+                {% else %}
+                    <p>Don't have an account? <a href="/register">Sign up here</a></p>
+                {% endif %}
+            </div>
+
+            <div class="auth-divider">
+                <span>or</span>
+            </div>
+
+            <div class="auth-demo">
+                <p class="demo-text">Try the demo with:</p>
+                <div class="demo-credentials">
+                    <code>demo@veilguard.com</code> / <code>demo123</code>
+                </div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<div id="notification" class="notification hidden">
+    <div class="notification-content">
+        <span id="notificationMessage"></span>
+        <button onclick="hideNotification()" class="notification-close">
+            <i class="fas fa-times"></i>
+        </button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Password toggle functionality
+function togglePassword() {
+    const passwordInput = document.getElementById('password');
+    const toggleIcon = document.getElementById('passwordToggleIcon');
+    
+    if (passwordInput.type === 'password') {
+        passwordInput.type = 'text';
+        toggleIcon.className = 'fas fa-eye-slash';
+    } else {
+        passwordInput.type = 'password';
+        toggleIcon.className = 'fas fa-eye';
+    }
+}
+
+// Hide notification function
+function hideNotification() {
+    document.getElementById('notification').classList.add('hidden');
+}
+
+// HTMX event handlers
+document.body.addEventListener('htmx:beforeRequest', function(evt) {
+    const form = evt.detail.elt;
+    const isRegister = form.getAttribute('data-is-register') === 'true';
+    
+    if (isRegister) {
+        // Validate password confirmation for registration
+        const password = form.querySelector('#password').value;
+        const confirmPassword = form.querySelector('#confirmPassword');
+        
+        if (confirmPassword && password !== confirmPassword.value) {
+            evt.preventDefault();
+            showNotification('Passwords do not match', 'error');
+            return false;
+        }
+    }
+});
+
+document.body.addEventListener('htmx:afterRequest', function(evt) {
+    if (evt.detail.xhr.status === 200) {
+        // Success - redirect to dashboard
+        setTimeout(() => {
+            window.location.href = '/dashboard';
+        }, 1500);
+    }
+});
+
+// Simple notification function for client-side validation
+function showNotification(message, type) {
+    const notification = document.getElementById('notification');
+    const messageElement = document.getElementById('notificationMessage');
+    
+    if (notification && messageElement) {
+        messageElement.textContent = message;
+        notification.className = `notification ${type}`;
+        
+        setTimeout(() => {
+            notification.classList.add('hidden');
+        }, 5000);
+    }
+}
+</script>
+{% endblock %}
