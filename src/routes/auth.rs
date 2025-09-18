@@ -57,14 +57,30 @@ pub async fn login(
     pool: web::Data<DbPool>,
     login_req: web::Json<LoginRequest>
 ) -> Result<HttpResponse> {
-    let user = match users::find_by_email(&pool, &login_req.email).await {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            return Ok(HttpResponse::Unauthorized().json("Invalid credentials"));
-        },
-        Err(e) => {
-            log::error!("Database error during login: {}", e);
-            return Ok(HttpResponse::InternalServerError().json("Login failed"));
+    // Determine if login is email or username based on presence of '@' symbol
+    let user = if login_req.login.contains('@') {
+        // Login with email
+        match users::find_by_email(&pool, &login_req.login).await {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                return Ok(HttpResponse::Unauthorized().json("Invalid credentials"));
+            },
+            Err(e) => {
+                log::error!("Database error during email login: {}", e);
+                return Ok(HttpResponse::InternalServerError().json("Login failed"));
+            }
+        }
+    } else {
+        // Login with username
+        match users::find_by_username(&pool, &login_req.login).await {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                return Ok(HttpResponse::Unauthorized().json("Invalid credentials"));
+            },
+            Err(e) => {
+                log::error!("Database error during username login: {}", e);
+                return Ok(HttpResponse::InternalServerError().json("Login failed"));
+            }
         }
     };
     

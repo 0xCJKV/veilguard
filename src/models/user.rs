@@ -31,13 +31,7 @@ pub struct CreateUserRequest {
 
 #[derive(Deserialize)]
 pub struct LoginRequest {
-    pub email: String,
-    pub password: String,
-}
-
-#[derive(Deserialize)]
-pub struct LoginByUsernameRequest {
-    pub username: String,
+    pub login: String,
     pub password: String,
 }
 
