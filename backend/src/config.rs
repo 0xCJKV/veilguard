@@ -7,7 +7,11 @@ pub struct Config {
     pub paseto_key: String,
     pub host: String,
     pub port: u16,
-    pub log_level: String, 
+    pub log_level: String,
+    pub redis_url: String,
+    pub rate_limit_requests: u32,
+    pub rate_limit_window_seconds: u64,
+    pub csrf_secret: String,
 }
 
 impl Config {
@@ -27,6 +31,18 @@ impl Config {
                 .expect("PORT must be a valid number"),
             log_level: env::var("LOG_LEVEL")
                 .unwrap_or_else(|_| "info".to_string()),
+            redis_url: env::var("REDIS_URL")
+                .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
+            rate_limit_requests: env::var("RATE_LIMIT_REQUESTS")
+                .unwrap_or_else(|_| "100".to_string())
+                .parse()
+                .expect("RATE_LIMIT_REQUESTS must be a valid number"),
+            rate_limit_window_seconds: env::var("RATE_LIMIT_WINDOW_SECONDS")
+                .unwrap_or_else(|_| "60".to_string())
+                .parse()
+                .expect("RATE_LIMIT_WINDOW_SECONDS must be a valid number"),
+            csrf_secret: env::var("CSRF_SECRET")
+                .expect("CSRF_SECRET must be set"),
         }
     }
 

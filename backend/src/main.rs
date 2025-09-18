@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod database; 
 mod errors;
+mod middleware;
 mod models;
 mod routes;
 
@@ -10,7 +11,11 @@ use axum::{
     routing::{get, post, put, delete},
     Router,
 };
-use auth::auth_middleware;
+use middleware::{
+    auth_middleware, rate_limit_middleware,
+    csrf::{create_csrf_protection, get_csrf_token},
+    create_rate_limiter, RateLimitConfig, RateLimitAlgorithm
+};
 use config::Config;
 use env_logger::Env;
 use std::sync::Arc;
@@ -37,19 +42,42 @@ async fn main() {
             std::process::exit(1);
         }
     };
+
+    // Initialize Redis manager
+    let redis_manager = match database::RedisManager::new(&config).await {
+        Ok(redis) => {
+            println!("✅ Redis connection established successfully");
+            Arc::new(redis)
+        },
+        Err(e) => {
+            eprintln!("❌ Failed to connect to Redis: {}", e);
+            eprintln!("Check your REDIS_URL: {}", config.redis_url);
+            std::process::exit(1);
+        }
+    };
+
+    // Create CSRF protection
+    let csrf_protection = Arc::new(create_csrf_protection(redis_manager.clone(), &config));
+    
+    // Create rate limiter
+    let rate_limiter = Arc::new(create_rate_limiter(redis_manager.clone(), &config));
     
     println!("🚀 Starting server at http://{}", bind_address);
 
     // Build the application with routes and middleware
     let app = Router::new()
-        .nest("/api/v1", api_routes())
+        .nest("/api/v1", api_routes(csrf_protection.clone()))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
                 .layer(CorsLayer::permissive())
                 .layer(Extension(db_pool))
                 .layer(Extension(Arc::new(config)))
-        );
+                .layer(Extension(redis_manager))
+                .layer(Extension(csrf_protection.clone()))
+                .layer(Extension(rate_limiter))
+        )
+        .with_state(csrf_protection);
 
     // Create the listener
     let listener = tokio::net::TcpListener::bind(&bind_address)
@@ -68,22 +96,36 @@ async fn main() {
         });
 }
 
-fn api_routes() -> Router {
-    Router::new()
-        // Auth routes (public)
+fn api_routes(csrf_protection: Arc<middleware::csrf::CsrfProtection>) -> Router<Arc<middleware::csrf::CsrfProtection>> {
+    // Create user routes with the correct state type and auth middleware
+    let protected_routes = user_routes(csrf_protection.clone())
+        .layer(axum::middleware::from_fn(auth_middleware));
+
+    // Create auth routes with rate limiting
+    let auth_routes = Router::new()
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/refresh", post(routes::auth::refresh_token))
         .route("/auth/logout", post(routes::auth::logout))
-        // User routes (protected)
-        .nest("/users", user_routes().layer(axum::middleware::from_fn(auth_middleware)))
+        .layer(axum::middleware::from_fn(rate_limit_middleware));
+
+    Router::new()
+        // CSRF token endpoint (public)
+        .route("/csrf/token", get(get_csrf_token))
+        // Auth routes (public with rate limiting)
+        .merge(auth_routes)
+        // User routes (protected with auth and CSRF)
+        .nest("/users", protected_routes)
+        .with_state(csrf_protection)
 }
 
-fn user_routes() -> Router {
+// Updated function to accept and return the correct state type
+fn user_routes(csrf_protection: Arc<middleware::csrf::CsrfProtection>) -> Router<Arc<middleware::csrf::CsrfProtection>> {
     Router::new()
         .route("/", get(routes::users::list_users))
         .route("/{id}", get(routes::users::get_user))
         .route("/{id}", put(routes::users::update_user))
         .route("/{id}", delete(routes::users::delete_user))
         .route("/{id}/profile", get(routes::users::get_user_profile))
+        .with_state(csrf_protection)
 }

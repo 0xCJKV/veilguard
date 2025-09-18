@@ -51,13 +51,7 @@ impl Claims {
         }
     }
 
-    /// Add a custom claim
-    pub fn with_claim<T: Serialize>(mut self, key: &str, value: T) -> Result<Self, AppError> {
-        let json_value = serde_json::to_value(value)
-            .map_err(|e| AppError::TokenError(format!("Failed to serialize claim: {}", e)))?;
-        self.custom.insert(key.to_string(), json_value);
-        Ok(self)
-    }
+
 
     /// Get a custom claim
     pub fn get_claim<T: for<'de> Deserialize<'de>>(&self, key: &str) -> Result<Option<T>, AppError> {
@@ -228,17 +222,5 @@ impl PasetoManager {
         Ok(claims)
     }
 
-    /// Extract user ID from token without full validation (for middleware)
-    pub fn extract_user_id(&self, token: &str) -> Result<String, AppError> {
-        let claims = self.validate_token(token)?;
-        Ok(claims.sub)
-    }
 
-    /// Check if a token is expired without full validation
-    pub fn is_token_expired(&self, token: &str) -> bool {
-        match self.validate_token(token) {
-            Ok(claims) => claims.is_expired(),
-            Err(_) => true, // Treat invalid tokens as expired
-        }
-    }
 }

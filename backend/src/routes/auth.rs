@@ -8,6 +8,8 @@ use std::sync::Arc;
 use crate::{
     auth::{
         hash_password, verify_password, PasetoManager,
+    },
+    middleware::{
         create_secure_cookie, create_delete_cookie, 
         ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE
     },

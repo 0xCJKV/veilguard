@@ -5,7 +5,8 @@ use axum::{
 };
 use std::sync::Arc;
 use crate::{
-    auth::{AuthUser, hash_password, verify_password},
+    auth::{hash_password, verify_password},
+    middleware::AuthUser,
     database::{users, DbPool},
     models::{UserResponse, UpdateUserRequest},
     errors::{AppError, Result},

@@ -83,7 +83,7 @@ pub async fn auth_middleware(
                         Some(refresh_token) => {
                             // Validate refresh token
                             match paseto_manager.validate_token(&refresh_token) {
-                                Ok(claims) => {
+                                Ok(_claims) => {
                                     // Refresh token is valid, but we need a new access token
                                     // For now, we'll reject the request and let the client handle refresh
                                     None
