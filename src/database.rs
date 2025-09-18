@@ -9,7 +9,7 @@ pub async fn create_pool(config: &Config) -> Result<DbPool, sqlx::Error> {
 
 pub mod users {
     use super::*;
-    use crate::models::user::{User, CreateUserRequest, UpdateUserRequest};
+    use crate::models::{User, CreateUserRequest, UpdateUserRequest};
     use chrono::Utc;
 
     pub async fn create_user(

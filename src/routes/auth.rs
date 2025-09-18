@@ -2,7 +2,7 @@ use actix_web::{web, HttpResponse, Result};
 use crate::{
     auth::{hash_password, verify_password},
     database::{users, DbPool},
-    models::user::{CreateUserRequest, LoginRequest, UserResponse},
+    models::{CreateUserRequest, LoginRequest, UserResponse},
     errors::AppError,
 };
 
