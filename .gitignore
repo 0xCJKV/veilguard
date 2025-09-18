@@ -2,6 +2,7 @@
 .env
 bin
 *.out
+pkg/
 target/
 **/*.rs.bk
 Cargo.lock
