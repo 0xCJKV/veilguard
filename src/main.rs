@@ -11,9 +11,8 @@ use env_logger::Env;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
-    env_logger::init_from_env(Env::default().default_filter_or("info"));
-    
     let config = Config::from_env();
+    env_logger::init_from_env(Env::default().default_filter_or(&config.rust_log()));
     let bind_address = format!("{}:{}", config.host, config.port);
 
     let db_pool = match database::create_pool(&config).await {
