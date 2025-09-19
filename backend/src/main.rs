@@ -14,7 +14,7 @@ use axum::{
 use middleware::{
     auth_middleware, rate_limit_middleware,
     csrf::{create_csrf_protection, get_csrf_token},
-    create_rate_limiter, RateLimitConfig, RateLimitAlgorithm
+    create_rate_limiter
 };
 use config::Config;
 use env_logger::Env;
@@ -62,11 +62,24 @@ async fn main() {
     // Create rate limiter
     let rate_limiter = Arc::new(create_rate_limiter(redis_manager.clone(), &config));
     
+    // Initialize session manager
+    let session_config = models::ses::SessionConfig::default();
+    let session_manager = match auth::ses::SessionManager::new(&config.redis_url, session_config) {
+        Ok(manager) => {
+            println!("✅ Session manager initialized successfully");
+            Arc::new(manager)
+        },
+        Err(e) => {
+            eprintln!("❌ Failed to initialize session manager: {}", e);
+            std::process::exit(1);
+        }
+    };
+    
     println!("🚀 Starting server at http://{}", bind_address);
 
     // Build the application with routes and middleware
     let app = Router::new()
-        .nest("/api/v1", api_routes(csrf_protection.clone()))
+        .nest("/api/v1", api_routes(csrf_protection.clone(), session_manager.clone()))
         .layer(
             ServiceBuilder::new()
                 .layer(TraceLayer::new_for_http())
@@ -76,6 +89,7 @@ async fn main() {
                 .layer(Extension(redis_manager))
                 .layer(Extension(csrf_protection.clone()))
                 .layer(Extension(rate_limiter))
+                .layer(Extension(session_manager))
         )
         .with_state(csrf_protection);
 
@@ -96,17 +110,29 @@ async fn main() {
         });
 }
 
-fn api_routes(csrf_protection: Arc<middleware::csrf::CsrfProtection>) -> Router<Arc<middleware::csrf::CsrfProtection>> {
+fn api_routes(csrf_protection: Arc<middleware::csrf::CsrfProtection>, session_manager: Arc<auth::ses::SessionManager>) -> Router<Arc<middleware::csrf::CsrfProtection>> {
     // Create user routes with the correct state type and auth middleware
     let protected_routes = user_routes(csrf_protection.clone())
+        .layer(Extension(session_manager.clone()))
         .layer(axum::middleware::from_fn(auth_middleware));
 
-    // Create auth routes with rate limiting
+    // Create session routes with auth middleware and session manager extension
+    let session_routes = routes::ses::create_routes::<Arc<middleware::csrf::CsrfProtection>>()
+        .layer(Extension(session_manager.clone()))
+        .layer(axum::middleware::from_fn(auth_middleware));
+
+    // Create admin session routes with auth middleware and session manager extension
+    let admin_session_routes = routes::ses::create_admin_routes::<Arc<middleware::csrf::CsrfProtection>>()
+        .layer(Extension(session_manager.clone()))
+        .layer(axum::middleware::from_fn(auth_middleware));
+
+    // Create auth routes with rate limiting and session manager
     let auth_routes = Router::new()
         .route("/auth/register", post(routes::auth::register))
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/refresh", post(routes::auth::refresh_token))
         .route("/auth/logout", post(routes::auth::logout))
+        .layer(Extension(session_manager.clone()))
         .layer(axum::middleware::from_fn(rate_limit_middleware));
 
     Router::new()
@@ -116,6 +142,10 @@ fn api_routes(csrf_protection: Arc<middleware::csrf::CsrfProtection>) -> Router<
         .merge(auth_routes)
         // User routes (protected with auth and CSRF)
         .nest("/users", protected_routes)
+        // Session routes (protected with auth)
+        .nest("/sessions", session_routes)
+        // Admin session routes (protected with auth)
+        .nest("/admin/sessions", admin_session_routes)
         .with_state(csrf_protection)
 }
 

@@ -1,21 +1,23 @@
 use axum::{
     extract::Extension,
-    http::StatusCode,
+    http::{StatusCode, HeaderMap},
     response::Json,
 };
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
+use std::net::IpAddr;
+use std::collections::HashMap;
 use crate::{
     auth::{
-        hash_password, verify_password, PasetoManager,
+        hash_password, verify_password, PasetoManager, ses::SessionManager,
     },
     middleware::{
         create_secure_cookie, create_delete_cookie, 
-        ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE
+        ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE, SESSION_TOKEN_COOKIE
     },
     config::Config,
     database::{users, DbPool},
-    models::{CreateUserRequest, LoginRequest, UserResponse},
+    models::{CreateUserRequest, LoginRequest, UserResponse, ses::SecurityLevel},
     errors::{AppError, Result},
 };
 
@@ -67,6 +69,8 @@ pub async fn register(
 pub async fn login(
     Extension(pool): Extension<Arc<DbPool>>,
     Extension(config): Extension<Arc<Config>>,
+    Extension(session_manager): Extension<Arc<SessionManager>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(login_req): Json<LoginRequest>
 ) -> Result<(CookieJar, Json<serde_json::Value>)> {
@@ -108,12 +112,29 @@ pub async fn login(
         let refresh_token = paseto_manager.generate_refresh_token(&user_id)
             .map_err(|e| AppError::TokenError(format!("Failed to generate refresh token: {}", e)))?;
         
+        // Extract request information for session creation
+        let ip_address = extract_ip_from_headers(&headers)?;
+        let user_agent = extract_user_agent(&headers);
+        let device_fingerprint = generate_device_fingerprint(&headers);
+        
+        // Create session
+        let session = session_manager.create_session(
+            user_id.clone(),
+            ip_address,
+            user_agent.clone(),
+            device_fingerprint,
+            "password".to_string(), // login method
+            SecurityLevel::Standard,
+            Some(HashMap::new()), // metadata
+        ).await.map_err(|e| AppError::TokenError(format!("Failed to create session: {}", e)))?;
+        
         // Create secure cookies
         let access_cookie = create_secure_cookie(ACCESS_TOKEN_COOKIE, &access_token, 15 * 60); // 15 minutes
         let refresh_cookie = create_secure_cookie(REFRESH_TOKEN_COOKIE, &refresh_token, 7 * 24 * 60 * 60); // 7 days
+        let session_cookie = create_secure_cookie(SESSION_TOKEN_COOKIE, &session.token, 7 * 24 * 60 * 60); // 7 days
         
         // Add cookies to jar
-        let jar = jar.add(access_cookie).add(refresh_cookie);
+        let jar = jar.add(access_cookie).add(refresh_cookie).add(session_cookie);
         
         let response: UserResponse = user.into();
         Ok((jar, Json(serde_json::json!({
@@ -122,6 +143,10 @@ pub async fn login(
             "tokens": {
                 "access_token": access_token,
                 "refresh_token": refresh_token
+            },
+            "session": {
+                "session_id": session.id,
+                "expires_at": session.expires_at
             }
         }))))
     } else {
@@ -157,16 +182,79 @@ pub async fn refresh_token(
     }))))
 }
 
-/// Logout user by clearing authentication cookies
-pub async fn logout(jar: CookieJar) -> Result<(CookieJar, Json<serde_json::Value>)> {
+/// Logout user by clearing authentication cookies and revoking session
+pub async fn logout(
+    Extension(session_manager): Extension<Arc<SessionManager>>,
+    jar: CookieJar
+) -> Result<(CookieJar, Json<serde_json::Value>)> {
+    // Try to revoke session if session token exists
+    if let Some(session_token) = jar.get(SESSION_TOKEN_COOKIE) {
+        if let Ok(Some(session)) = session_manager.get_session_by_token(session_token.value()).await {
+            let _ = session_manager.revoke_session(&session.id, Some("User logout")).await;
+        }
+    }
+    
     // Create delete cookies
     let delete_access = create_delete_cookie(ACCESS_TOKEN_COOKIE);
     let delete_refresh = create_delete_cookie(REFRESH_TOKEN_COOKIE);
+    let delete_session = create_delete_cookie(SESSION_TOKEN_COOKIE);
     
     // Add delete cookies to jar
-    let jar = jar.add(delete_access).add(delete_refresh);
+    let jar = jar.add(delete_access).add(delete_refresh).add(delete_session);
     
     Ok((jar, Json(serde_json::json!({
         "message": "Logged out successfully"
     }))))
+}
+
+/// Extract IP address from request headers
+fn extract_ip_from_headers(headers: &HeaderMap) -> Result<IpAddr> {
+    // Try X-Forwarded-For first (for proxies)
+    if let Some(forwarded_for) = headers.get("x-forwarded-for") {
+        if let Ok(forwarded_str) = forwarded_for.to_str() {
+            // Take the first IP in the chain
+            if let Some(first_ip) = forwarded_str.split(',').next() {
+                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+                    return Ok(ip);
+                }
+            }
+        }
+    }
+    
+    // Try X-Real-IP
+    if let Some(real_ip) = headers.get("x-real-ip") {
+        if let Ok(ip_str) = real_ip.to_str() {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                return Ok(ip);
+            }
+        }
+    }
+    
+    // Fallback to localhost
+    Ok("127.0.0.1".parse().unwrap())
+}
+
+/// Extract user agent from request headers
+fn extract_user_agent(headers: &HeaderMap) -> String {
+    headers
+        .get("user-agent")
+        .and_then(|ua| ua.to_str().ok())
+        .unwrap_or("Unknown")
+        .to_string()
+}
+
+/// Generate a simple device fingerprint from headers
+fn generate_device_fingerprint(headers: &HeaderMap) -> String {
+    let user_agent = extract_user_agent(headers);
+    let accept_language = headers
+        .get("accept-language")
+        .and_then(|lang| lang.to_str().ok())
+        .unwrap_or("unknown");
+    let accept_encoding = headers
+        .get("accept-encoding")
+        .and_then(|enc| enc.to_str().ok())
+        .unwrap_or("unknown");
+    
+    // Create a simple hash-like fingerprint
+    format!("{}:{}:{}", user_agent, accept_language, accept_encoding)
 }

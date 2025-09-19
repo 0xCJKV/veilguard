@@ -5,9 +5,10 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
+use std::net::IpAddr;
 
 use crate::{
-    auth::{Claims, PasetoManager},
+    auth::{Claims, PasetoManager, ses::SessionManager},
     config::Config,
     errors::AppError,
 };
@@ -17,11 +18,27 @@ use crate::{
 pub struct AuthUser {
     pub user_id: String,
     pub claims: Claims,
+    pub session_id: Option<String>,
+    pub session_valid: bool,
 }
 
 impl AuthUser {
     pub fn new(user_id: String, claims: Claims) -> Self {
-        Self { user_id, claims }
+        Self { 
+            user_id, 
+            claims, 
+            session_id: None, 
+            session_valid: false 
+        }
+    }
+
+    pub fn new_with_session(user_id: String, claims: Claims, session_id: String, session_valid: bool) -> Self {
+        Self { 
+            user_id, 
+            claims, 
+            session_id: Some(session_id), 
+            session_valid 
+        }
     }
 
     /// Get a custom claim from the token
@@ -49,10 +66,12 @@ impl AuthUser {
 /// Cookie names for authentication tokens
 pub const ACCESS_TOKEN_COOKIE: &str = "access_token";
 pub const REFRESH_TOKEN_COOKIE: &str = "refresh_token";
+pub const SESSION_TOKEN_COOKIE: &str = "session_token";
 
-/// Authentication middleware that validates PASETO tokens from cookies
+/// Authentication middleware that validates PASETO tokens and sessions from cookies
 pub async fn auth_middleware(
     Extension(config): Extension<Arc<Config>>,
+    Extension(session_manager): Extension<Arc<SessionManager>>,
     jar: CookieJar,
     mut request: Request,
     next: Next,
@@ -60,18 +79,55 @@ pub async fn auth_middleware(
     // Create PASETO manager
     let paseto_manager = PasetoManager::new(&config)?;
 
-    // Try to get access token from cookie
+    // Extract IP address from request headers
+    let ip_address = extract_ip_from_request(&request)?;
+    let user_agent = extract_user_agent_from_request(&request);
+
+    // Try to get access token and session token from cookies
     let access_token = jar
         .get(ACCESS_TOKEN_COOKIE)
         .map(|cookie| cookie.value().to_string());
+    
+    let session_token = jar
+        .get(SESSION_TOKEN_COOKIE)
+        .map(|cookie| cookie.value().to_string());
 
-    let auth_user = match access_token {
-        Some(token) => {
-            // Validate the access token
+    let auth_user = match (access_token, session_token) {
+        (Some(token), Some(session_token)) => {
+            // Validate both PASETO token and session
             match paseto_manager.validate_token(&token) {
                 Ok(claims) => {
                     let user_id = claims.sub.clone();
-                    Some(AuthUser::new(user_id, claims))
+                    
+                    // Validate session
+                    match session_manager.get_session_by_token(&session_token).await {
+                        Ok(Some(session)) => {
+                            // Verify session belongs to the same user
+                            if session.user_id == user_id {
+                                // Validate session with current request context
+                                match session_manager.validate_session(&session.id, ip_address, &user_agent).await {
+                                    Ok(validation_result) => {
+                                        if validation_result.is_valid {
+                                            Some(AuthUser::new_with_session(user_id, claims, session.id, true))
+                                        } else {
+                                            // Session validation failed
+                                            None
+                                        }
+                                    }
+                                    Err(_) => None,
+                                }
+                            } else {
+                                // Session doesn't belong to token user
+                                None
+                            }
+                        }
+                        Ok(None) => {
+                            // Session not found, but PASETO token is valid
+                            // Allow access but mark session as invalid
+                            Some(AuthUser::new(user_id, claims))
+                        }
+                        Err(_) => None,
+                    }
                 }
                 Err(_) => {
                     // Access token is invalid, try refresh token
@@ -96,7 +152,21 @@ pub async fn auth_middleware(
                 }
             }
         }
-        None => None,
+        (Some(token), None) => {
+            // Only PASETO token provided, validate it
+            match paseto_manager.validate_token(&token) {
+                Ok(claims) => {
+                    let user_id = claims.sub.clone();
+                    Some(AuthUser::new(user_id, claims))
+                }
+                Err(_) => None,
+            }
+        }
+        (None, Some(_session_token)) => {
+            // Only session token provided, not sufficient for authentication
+            None
+        }
+        (None, None) => None,
     };
 
     match auth_user {
@@ -136,4 +206,43 @@ pub fn create_delete_cookie(name: &str) -> axum_extra::extract::cookie::Cookie<'
         .max_age(time::Duration::seconds(0))
         .path("/")
         .build()
+}
+
+/// Extract IP address from request headers
+fn extract_ip_from_request(request: &Request) -> Result<IpAddr, AppError> {
+    let headers = request.headers();
+    
+    // Try X-Forwarded-For first (for proxies)
+    if let Some(forwarded_for) = headers.get("x-forwarded-for") {
+        if let Ok(forwarded_str) = forwarded_for.to_str() {
+            // Take the first IP in the chain
+            if let Some(first_ip) = forwarded_str.split(',').next() {
+                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+                    return Ok(ip);
+                }
+            }
+        }
+    }
+    
+    // Try X-Real-IP
+    if let Some(real_ip) = headers.get("x-real-ip") {
+        if let Ok(ip_str) = real_ip.to_str() {
+            if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                return Ok(ip);
+            }
+        }
+    }
+    
+    // Fallback to localhost
+    Ok("127.0.0.1".parse().unwrap())
+}
+
+/// Extract user agent from request headers
+fn extract_user_agent_from_request(request: &Request) -> String {
+    request
+        .headers()
+        .get("user-agent")
+        .and_then(|ua| ua.to_str().ok())
+        .unwrap_or("Unknown")
+        .to_string()
 }

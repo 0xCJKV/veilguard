@@ -29,6 +29,16 @@ pub enum AppError {
     Forbidden,
     TokenError(String),
     
+    // Session errors
+    SessionNotFound(String),
+    SessionExpired(String),
+    SessionRevoked(String),
+    SessionInvalid(String),
+    SessionSecurityViolation(String),
+    SessionConcurrencyLimitExceeded,
+    SessionCreationFailed(String),
+    RedisConnectionError(String),
+    
     // General errors
     InternalServerError(String),
     BadRequest(String),
@@ -56,6 +66,16 @@ impl fmt::Display for AppError {
             AppError::Unauthorized => write!(f, "Unauthorized access"),
             AppError::Forbidden => write!(f, "Forbidden access"),
             AppError::TokenError(msg) => write!(f, "Token error: {}", msg),
+            
+            // Session errors
+            AppError::SessionNotFound(id) => write!(f, "Session not found: {}", id),
+            AppError::SessionExpired(id) => write!(f, "Session expired: {}", id),
+            AppError::SessionRevoked(id) => write!(f, "Session revoked: {}", id),
+            AppError::SessionInvalid(msg) => write!(f, "Session invalid: {}", msg),
+            AppError::SessionSecurityViolation(msg) => write!(f, "Session security violation: {}", msg),
+            AppError::SessionConcurrencyLimitExceeded => write!(f, "Session concurrency limit exceeded"),
+            AppError::SessionCreationFailed(msg) => write!(f, "Session creation failed: {}", msg),
+            AppError::RedisConnectionError(msg) => write!(f, "Redis connection error: {}", msg),
             
             // General errors
             AppError::InternalServerError(msg) => write!(f, "Internal server error: {}", msg),
@@ -139,6 +159,57 @@ impl IntoResponse for AppError {
                     StatusCode::UNAUTHORIZED,
                     "Token validation failed".to_string(),
                     "Invalid or expired token".to_string()
+                )
+            },
+            
+            // Session errors
+            AppError::SessionNotFound(_) => (
+                StatusCode::NOT_FOUND,
+                "Session not found".to_string(),
+                "Session not found".to_string()
+            ),
+            AppError::SessionExpired(_) => (
+                StatusCode::UNAUTHORIZED,
+                "Session expired".to_string(),
+                "Session expired".to_string()
+            ),
+            AppError::SessionRevoked(_) => (
+                StatusCode::UNAUTHORIZED,
+                "Session revoked".to_string(),
+                "Session revoked".to_string()
+            ),
+            AppError::SessionInvalid(msg) => (
+                StatusCode::BAD_REQUEST,
+                msg.clone(),
+                "Invalid session".to_string()
+            ),
+            AppError::SessionSecurityViolation(msg) => {
+                tracing::warn!("Session security violation: {}", msg);
+                (
+                    StatusCode::FORBIDDEN,
+                    "Session security violation".to_string(),
+                    "Access denied due to security violation".to_string()
+                )
+            },
+            AppError::SessionConcurrencyLimitExceeded => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Session concurrency limit exceeded".to_string(),
+                "Too many active sessions".to_string()
+            ),
+            AppError::SessionCreationFailed(msg) => {
+                tracing::error!("Session creation failed: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Session creation failed".to_string(),
+                    "Unable to create session".to_string()
+                )
+            },
+            AppError::RedisConnectionError(msg) => {
+                tracing::error!("Redis connection error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Redis connection error".to_string(),
+                    "Internal server error".to_string()
                 )
             },
             
