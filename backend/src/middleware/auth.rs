@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::net::IpAddr;
 
 use crate::{
-    auth::{Claims, PasetoManager, ses::SessionManager},
+    auth::{Claims, PasetoManager, ses::{SessionManager, SecurityEventType}},
     config::Config,
+    database::redis::RedisManager,
     errors::AppError,
 };
 
@@ -66,12 +67,12 @@ impl AuthUser {
 /// Cookie names for authentication tokens
 pub const ACCESS_TOKEN_COOKIE: &str = "access_token";
 pub const REFRESH_TOKEN_COOKIE: &str = "refresh_token";
-pub const SESSION_TOKEN_COOKIE: &str = "session_token";
 
 /// Authentication middleware that validates PASETO tokens and sessions from cookies
 pub async fn auth_middleware(
     Extension(config): Extension<Arc<Config>>,
     Extension(session_manager): Extension<Arc<SessionManager>>,
+    Extension(redis_manager): Extension<Arc<RedisManager>>,
     jar: CookieJar,
     mut request: Request,
     next: Next,
@@ -83,99 +84,163 @@ pub async fn auth_middleware(
     let ip_address = extract_ip_from_request(&request)?;
     let user_agent = extract_user_agent_from_request(&request);
 
-    // Try to get access token and session token from cookies
+    // Try to get access token from cookies
     let access_token = jar
         .get(ACCESS_TOKEN_COOKIE)
         .map(|cookie| cookie.value().to_string());
-    
-    let session_token = jar
-        .get(SESSION_TOKEN_COOKIE)
-        .map(|cookie| cookie.value().to_string());
 
-    let auth_user = match (access_token, session_token) {
-        (Some(token), Some(session_token)) => {
-            // Validate both PASETO token and session
-            match paseto_manager.validate_token(&token) {
-                Ok(claims) => {
-                    let user_id = claims.sub.clone();
-                    
-                    // Validate session
-                    match session_manager.get_session_by_token(&session_token).await {
-                        Ok(Some(session)) => {
-                            // Verify session belongs to the same user
-                            if session.user_id == user_id {
-                                // Validate session with current request context
-                                match session_manager.validate_session(&session.id, ip_address, &user_agent).await {
-                                    Ok(validation_result) => {
-                                        if validation_result.is_valid {
-                                            Some(AuthUser::new_with_session(user_id, claims, session.id, true))
-                                        } else {
-                                            // Session validation failed
-                                            None
-                                        }
-                                    }
-                                    Err(_) => None,
-                                }
-                            } else {
-                                // Session doesn't belong to token user
-                                None
-                            }
-                        }
-                        Ok(None) => {
-                            // Session not found, but PASETO token is valid
-                            // Allow access but mark session as invalid
-                            Some(AuthUser::new(user_id, claims))
-                        }
-                        Err(_) => None,
-                    }
-                }
-                Err(_) => {
-                    // Access token is invalid, try refresh token
-                    let refresh_token = jar
-                        .get(REFRESH_TOKEN_COOKIE)
-                        .map(|cookie| cookie.value().to_string());
+    // Try to validate access token first
+    let auth_user = if let Some(access_token) = &access_token {
+        if let Ok(claims) = paseto_manager.validate_token(access_token) {
+            // Check if token is blacklisted
+            let jti = claims.get_claim::<String>("jti").unwrap_or(None);
+            let is_blacklisted = if let Some(ref token_id) = jti {
+                redis_manager.is_token_blacklisted(token_id).await.unwrap_or(false)
+            } else {
+                false
+            };
 
-                    match refresh_token {
-                        Some(refresh_token) => {
-                            // Validate refresh token
-                            match paseto_manager.validate_token(&refresh_token) {
-                                Ok(_claims) => {
-                                    // Refresh token is valid, but we need a new access token
-                                    // For now, we'll reject the request and let the client handle refresh
-                                    None
-                                }
-                                Err(_) => None,
-                            }
-                        }
-                        None => None,
-                    }
+            if is_blacklisted {
+                // Log security event for blacklisted token usage
+                if let Some(ref token_id) = jti {
+                    let _ = redis_manager.add_security_event(
+                        &claims.sub,
+                        SecurityEventType::BlacklistedTokenUsage,
+                        &format!("Attempted use of blacklisted token: {}", token_id),
+                        ip_address,
+                        &user_agent
+                    ).await;
                 }
+                None
+            } else if let Some(session_id) = claims.get_claim::<String>("sid").unwrap_or(None) {
+                // Validate session state in Redis
+                if let Ok(Some(session)) = session_manager.get_session(&session_id).await {
+                    let validation_result = session_manager.validate_session(&session.id, ip_address, &user_agent).await.unwrap_or_else(|_| {
+                        use crate::models::ses::{SessionValidationResult, ValidationError};
+                        SessionValidationResult {
+                            is_valid: false,
+                            session: None,
+                            validation_errors: vec![ValidationError::SessionNotFound],
+                            security_warnings: vec![],
+                        }
+                    });
+                    if session.is_valid() && 
+                        session.user_id == claims.sub &&
+                        validation_result.is_valid {
+                        Some(AuthUser::new_with_session(
+                            claims.sub.clone(),
+                            claims,
+                            session_id,
+                            true
+                        ))
+                    } else {
+                        // Token valid but session invalid - still allow access
+                        Some(AuthUser::new(claims.sub.clone(), claims))
+                    }
+                } else {
+                    // Token valid but no session - still allow access
+                    Some(AuthUser::new(claims.sub.clone(), claims))
+                }
+            } else {
+                // Token valid but no session ID - still allow access
+                Some(AuthUser::new(claims.sub.clone(), claims))
+            }
+        } else {
+            // Try refresh token if access token failed
+            let refresh_token = jar
+                .get(REFRESH_TOKEN_COOKIE)
+                .map(|cookie| cookie.value().to_string());
+            
+            if let Some(refresh_token) = refresh_token {
+                if let Ok(claims) = paseto_manager.validate_token(&refresh_token) {
+                    // Check if refresh token is blacklisted
+                    let jti = claims.get_claim::<String>("jti").unwrap_or(None);
+                    let is_blacklisted = if let Some(ref token_id) = jti {
+                        redis_manager.is_token_blacklisted(token_id).await.unwrap_or(false)
+                    } else {
+                        false
+                    };
+
+                    if is_blacklisted {
+                        // Log security event for blacklisted refresh token usage
+                        if let Some(ref token_id) = jti {
+                            let _ = redis_manager.add_security_event(
+                                &claims.sub,
+                                SecurityEventType::BlacklistedTokenUsage,
+                                &format!("Attempted use of blacklisted refresh token: {}", token_id),
+                                ip_address,
+                                &user_agent
+                            ).await;
+                        }
+                        None
+                    } else {
+                        // Check for session ID in refresh token too
+                        let session_id = claims.get_claim::<String>("sid").unwrap_or(None);
+                        let session_valid = if let Some(ref sid) = session_id {
+                            session_manager.get_session(sid).await
+                                .map(|s| s.map(|session| session.is_valid()).unwrap_or(false))
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+                        
+                        Some(AuthUser::new_with_session(claims.sub.clone(), claims, session_id.unwrap_or_default(), session_valid))
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
             }
         }
-        (Some(token), None) => {
-            // Only PASETO token provided, validate it
-            match paseto_manager.validate_token(&token) {
-                Ok(claims) => {
-                    let user_id = claims.sub.clone();
-                    Some(AuthUser::new(user_id, claims))
-                }
-                Err(_) => None,
-            }
-        }
-        (None, Some(_session_token)) => {
-            // Only session token provided, not sufficient for authentication
-            None
-        }
-        (None, None) => None,
+    } else {
+        None
     };
 
     match auth_user {
         Some(user) => {
+            // Log successful authentication analytics
+            if let Some(session_id) = &user.session_id {
+                let analytics_data = serde_json::json!({
+                    "timestamp": chrono::Utc::now().timestamp(),
+                    "user_id": user.user_id,
+                    "ip_address": ip_address.to_string(),
+                    "user_agent": user_agent,
+                    "session_valid": user.session_valid,
+                    "auth_method": "token"
+                });
+                
+                // Store session analytics
+                let _ = redis_manager.store_session_analytics(
+                    session_id,
+                    &analytics_data.to_string(),
+                    86400 // 24 hours TTL for analytics
+                ).await;
+                
+                // Log security event for successful authentication
+                let _ = redis_manager.add_security_event(
+                    &user.user_id,
+                    SecurityEventType::SessionValidated,
+                    "Successful token authentication",
+                    ip_address,
+                    &user_agent
+                ).await;
+            }
+            
             // Insert the authenticated user into request extensions
             request.extensions_mut().insert(user);
             Ok(next.run(request).await)
         }
         None => {
+            // Log failed authentication attempt
+            let _ = redis_manager.add_security_event(
+                "unknown",
+                SecurityEventType::AuthenticationFailed,
+                "No valid authentication token found",
+                ip_address,
+                &user_agent
+            ).await;
+            
             // No valid authentication found
             Err(AppError::Unauthorized)
         }

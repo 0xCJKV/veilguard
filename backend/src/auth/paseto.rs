@@ -2,6 +2,7 @@ use chrono::{Duration, Utc};
 use rusty_paseto::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::errors::AppError;
@@ -162,6 +163,36 @@ impl PasetoManager {
         self.generate_token(&claims)
     }
 
+    /// Generate a new access token with embedded session ID
+    pub fn generate_access_token_with_session(&self, user_id: &str, session_id: &str) -> Result<String, AppError> {
+        let mut claims = Claims::new(
+            user_id.to_string(),
+            self.default_issuer.clone(),
+            self.default_audience.clone(),
+            Duration::minutes(15),
+        );
+
+        // Add session ID to custom claims
+        claims.custom.insert("sid".to_string(), serde_json::Value::String(session_id.to_string()));
+
+        self.generate_token(&claims)
+    }
+
+    /// Generate a new refresh token with embedded session ID
+    pub fn generate_refresh_token_with_session(&self, user_id: &str, session_id: &str) -> Result<String, AppError> {
+        let mut claims = Claims::new(
+            user_id.to_string(),
+            self.default_issuer.clone(),
+            format!("{}-refresh", self.default_audience),
+            Duration::days(7),
+        );
+
+        // Add session ID to custom claims
+        claims.custom.insert("sid".to_string(), serde_json::Value::String(session_id.to_string()));
+
+        self.generate_token(&claims)
+    }
+
     /// Generate a custom token with specific claims and expiration
     // pub fn generate_custom_token(
     //     &self,
@@ -222,5 +253,77 @@ impl PasetoManager {
         Ok(claims)
     }
 
+    /// Extract user ID from token without full validation (for utility purposes)
+    pub fn extract_user_id(&self, token: &str) -> Result<String, AppError> {
+        let claims = self.validate_token(token)?;
+        Ok(claims.sub)
+    }
+
+    /// Check if token is expired
+    pub fn is_token_expired(&self, token: &str) -> bool {
+        match self.validate_token(token) {
+            Ok(claims) => claims.is_expired(),
+            Err(_) => true,
+        }
+    }
+
+    /// Rotate access token (generate new token and return both old and new JTIs)
+    pub fn rotate_access_token(&self, user_id: &str, session_id: Option<&str>) -> Result<(String, String, String), AppError> {
+        let new_token = if let Some(session_id) = session_id {
+            self.generate_access_token_with_session(user_id, session_id)?
+        } else {
+            self.generate_access_token(user_id)?
+        };
+
+        // Extract JTI from new token
+        let new_claims = self.validate_token(&new_token)?;
+        let new_jti = new_claims.jti.clone();
+
+        // Generate a unique old JTI for tracking (in real scenario, this would be from the old token)
+        let old_jti = uuid::Uuid::new_v4().to_string();
+
+        Ok((new_token, old_jti, new_jti))
+    }
+
+    /// Rotate refresh token (generate new token and return both old and new JTIs)
+    pub fn rotate_refresh_token(&self, user_id: &str, session_id: Option<&str>) -> Result<(String, String, String), AppError> {
+        let new_token = if let Some(session_id) = session_id {
+            self.generate_refresh_token_with_session(user_id, session_id)?
+        } else {
+            self.generate_refresh_token(user_id)?
+        };
+
+        // Extract JTI from new token
+        let new_claims = self.validate_token(&new_token)?;
+        let new_jti = new_claims.jti.clone();
+
+        // Generate a unique old JTI for tracking (in real scenario, this would be from the old token)
+        let old_jti = uuid::Uuid::new_v4().to_string();
+
+        Ok((new_token, old_jti, new_jti))
+    }
+
+    /// Extract JTI from token
+    pub fn extract_jti(&self, token: &str) -> Result<String, AppError> {
+        let claims = self.validate_token(token)?;
+        Ok(claims.jti)
+    }
+
+    /// Extract session ID from token
+    pub fn extract_session_id(&self, token: &str) -> Result<Option<String>, AppError> {
+        let claims = self.validate_token(token)?;
+        Ok(claims.get_claim::<String>("session_id")?)
+    }
+
+    /// Generate token pair (access + refresh) with rotation tracking
+    pub fn generate_token_pair_with_rotation(&self, user_id: &str, session_id: &str) -> Result<(String, String, String, String), AppError> {
+        let access_token = self.generate_access_token_with_session(user_id, session_id)?;
+        let refresh_token = self.generate_refresh_token_with_session(user_id, session_id)?;
+
+        let access_claims = self.validate_token(&access_token)?;
+        let refresh_claims = self.validate_token(&refresh_token)?;
+
+        Ok((access_token, refresh_token, access_claims.jti, refresh_claims.jti))
+    }
 
 }

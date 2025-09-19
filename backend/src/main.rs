@@ -62,11 +62,11 @@ async fn main() {
     // Create rate limiter
     let rate_limiter = Arc::new(create_rate_limiter(redis_manager.clone(), &config));
     
-    // Initialize session manager
+    // Initialize session manager with RedisManager integration
     let session_config = models::ses::SessionConfig::default();
-    let session_manager = match auth::ses::SessionManager::new(&config.redis_url, session_config) {
+    let session_manager = match auth::ses::SessionManager::new_with_redis_manager(&config.redis_url, session_config, redis_manager.clone()) {
         Ok(manager) => {
-            println!("✅ Session manager initialized successfully");
+            println!("✅ Session manager initialized successfully with Redis integration");
             Arc::new(manager)
         },
         Err(e) => {
@@ -132,6 +132,8 @@ fn api_routes(csrf_protection: Arc<middleware::csrf::CsrfProtection>, session_ma
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/refresh", post(routes::auth::refresh_token))
         .route("/auth/logout", post(routes::auth::logout))
+        .route("/auth/analytics", get(routes::auth::get_analytics))
+        .route("/auth/user-analytics", get(routes::auth::get_user_analytics))
         .layer(Extension(session_manager.clone()))
         .layer(axum::middleware::from_fn(rate_limit_middleware));
 
