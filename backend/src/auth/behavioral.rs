@@ -8,6 +8,7 @@ use crate::models::security::{
     RiskAssessment, RiskFactor, RiskFactorType, SecurityAction, EventSeverity,
     BehavioralProfile, SessionMetrics, ActivityType
 };
+use super::utils::{calculate_distance, calculate_travel_velocity};
 
 /// Geographic location data for enhanced risk assessment
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -306,11 +307,11 @@ impl Session {
         let recent_failures = user_behavior.failed_attempt_patterns.iter()
             .filter(|pattern| {
                 let time_diff = Utc::now() - pattern.timestamp;
-                time_diff.num_hours() < 24
+                time_diff.num_hours() < 24 // Last 24 hours
             })
             .count();
 
-        if recent_failures > 5 {
+        if recent_failures > 3 {
             risk_score += 0.2;
         }
 
@@ -323,20 +324,4 @@ impl Session {
 
         risk_score.min(1.0)
     }
-}
-
-/// Calculate distance between two geographic coordinates in kilometers
-pub fn calculate_distance(coord1: (f64, f64), coord2: (f64, f64)) -> f64 {
-    let (lat1, lon1) = coord1;
-    let (lat2, lon2) = coord2;
-    
-    let r = 6371.0; // Earth's radius in kilometers
-    let d_lat = (lat2 - lat1).to_radians();
-    let d_lon = (lon2 - lon1).to_radians();
-    
-    let a = (d_lat / 2.0).sin().powi(2) +
-        lat1.to_radians().cos() * lat2.to_radians().cos() * (d_lon / 2.0).sin().powi(2);
-    let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
-    
-    r * c
 }

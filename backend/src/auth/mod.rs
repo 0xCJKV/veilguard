@@ -5,6 +5,7 @@ pub mod behavioral;
 pub mod audit;
 pub mod threat;
 pub mod binding;
+pub mod utils;
 
 pub use paseto::{Claims, PasetoManager};
 pub use pw::{hash_password, verify_password};

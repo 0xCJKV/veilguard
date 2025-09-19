@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::errors::AppError;
+use super::utils::{is_expired, generate_secure_token};
 
 /// Standard JWT-like claims structure for PASETO tokens
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,9 +67,9 @@ impl Claims {
         }
     }
 
-    /// Check if the token is expired
+    /// Check if token is expired
     pub fn is_expired(&self) -> bool {
-        Utc::now().timestamp() > self.exp
+        is_expired(self.exp as u64)
     }
 
     /// Check if the token is valid (not before time)

@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use crate::errors::AppError;
 use crate::models::ses::Session;
 use crate::models::security::{SecurityConfig, SecurityAction, EventSeverity};
+use super::utils::{sha256_hash, sha256_hash_multiple, generate_secure_token};
 
 /// Session binding manager for cryptographic session security
 pub struct SessionBindingManager {
@@ -308,63 +309,34 @@ impl SessionBindingManager {
 
     /// Generate a cryptographic binding token
     fn generate_binding_token(&self, session: &Session, device_hash: &str) -> Result<String, AppError> {
-        let mut hasher = Sha256::new();
-        hasher.update(session.id.as_bytes());
-        hasher.update(session.user_id.as_bytes());
-        hasher.update(session.created_ip.to_string().as_bytes());
-        hasher.update(device_hash.as_bytes());
-        hasher.update(session.created_at.timestamp().to_string().as_bytes());
+        let token_data = &[
+            &session.id,
+            &session.user_id,
+            &session.created_ip.to_string(),
+            device_hash,
+            &session.created_at.timestamp().to_string(),
+        ];
         
-        // Add some entropy
-        hasher.update(uuid::Uuid::new_v4().to_string().as_bytes());
-        
-        let result = hasher.finalize();
-        Ok(hex::encode(result))
+        let token = sha256_hash_multiple(token_data);
+        Ok(format!("bind_{}", &token[..32]))
     }
 
     /// Hash device fingerprint for secure storage
     fn hash_device_fingerprint(&self, fingerprint: &DeviceFingerprint) -> Result<String, AppError> {
-        let mut hasher = Sha256::new();
-        hasher.update(fingerprint.user_agent.as_bytes());
+        let fingerprint_data = &[
+            &fingerprint.user_agent,
+            fingerprint.screen_resolution.as_deref().unwrap_or(""),
+            fingerprint.timezone.as_deref().unwrap_or(""),
+            &fingerprint.languages.join(","),
+            fingerprint.platform.as_deref().unwrap_or(""),
+            &fingerprint.hardware_concurrency.unwrap_or(0).to_string(),
+            &fingerprint.device_memory.unwrap_or(0.0).to_string(),
+            fingerprint.webgl_renderer.as_deref().unwrap_or(""),
+            fingerprint.canvas_fingerprint.as_deref().unwrap_or(""),
+            fingerprint.audio_fingerprint.as_deref().unwrap_or(""),
+        ];
         
-        if let Some(ref resolution) = fingerprint.screen_resolution {
-            hasher.update(resolution.as_bytes());
-        }
-        
-        if let Some(ref timezone) = fingerprint.timezone {
-            hasher.update(timezone.as_bytes());
-        }
-        
-        for lang in &fingerprint.languages {
-            hasher.update(lang.as_bytes());
-        }
-        
-        if let Some(ref platform) = fingerprint.platform {
-            hasher.update(platform.as_bytes());
-        }
-        
-        if let Some(concurrency) = fingerprint.hardware_concurrency {
-            hasher.update(concurrency.to_string().as_bytes());
-        }
-        
-        if let Some(memory) = fingerprint.device_memory {
-            hasher.update(memory.to_string().as_bytes());
-        }
-        
-        if let Some(ref webgl) = fingerprint.webgl_renderer {
-            hasher.update(webgl.as_bytes());
-        }
-        
-        if let Some(ref canvas) = fingerprint.canvas_fingerprint {
-            hasher.update(canvas.as_bytes());
-        }
-        
-        if let Some(ref audio) = fingerprint.audio_fingerprint {
-            hasher.update(audio.as_bytes());
-        }
-        
-        let result = hasher.finalize();
-        Ok(hex::encode(result))
+        Ok(sha256_hash_multiple(fingerprint_data))
     }
 
     /// Hash TLS fingerprint

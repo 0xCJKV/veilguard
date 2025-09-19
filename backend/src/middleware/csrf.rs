@@ -24,6 +24,7 @@ use crate::{
         threat::{ThreatDetectionEngine, ThreatEvaluationResult},
         audit::{AuditEvent, AuditEventType, EventOutcome, EventSeverity},
         ses::{SessionManager, SecurityEventType},
+        utils::{sha256_hash, is_expired, generate_secure_token},
     },
 };
 
@@ -146,7 +147,7 @@ impl CsrfToken {
         behavioral_context: Option<String>,
     ) -> Result<Self, AppError> {
         let token_id = generate_secure_id();
-        let value = generate_secure_token();
+        let value = generate_secure_token(32)?;
         let current_time = current_timestamp();
         
         let user_agent_hash = user_agent.as_ref().map(|ua| sha256_hash(ua));
@@ -207,8 +208,7 @@ impl CsrfToken {
 
     /// Check if token is expired
     pub fn is_expired(&self, lifetime: u64) -> bool {
-        let now = current_timestamp();
-        now - self.created_at > lifetime
+        is_expired(self.created_at + lifetime)
     }
 
     /// Check if token needs regeneration
@@ -825,30 +825,17 @@ pub async fn get_csrf_token(
 pub fn create_csrf_protection(redis: Arc<RedisManager>, config: &Config) -> CsrfProtection {
     let csrf_config = CsrfConfig {
         secret_key: config.csrf_secret.clone(),
-        token_lifetime: 3600, // 1 hour - can be made configurable
+        token_lifetime: 3600, // 1 hour default
         cookie_name: "csrf_token".to_string(),
-        header_name: "x-csrf-token".to_string(),
+        header_name: "X-CSRF-Token".to_string(),
         form_field_name: "_csrf_token".to_string(),
-        secure_cookies: true, // Should be true in production
-        same_site: SameSite::Strict,
-        protected_methods: vec![
-            Method::POST,
-            Method::PUT,
-            Method::PATCH,
-            Method::DELETE,
-        ],
-        excluded_paths: vec![
-            "/api/auth/login".to_string(),
-            "/api/auth/register".to_string(),
-            "/api/health".to_string(),
-            "/api/csrf/token".to_string(),
-        ],
-        excluded_path_prefixes: vec![
-            "/api/public/".to_string(),
-            "/static/".to_string(),
-        ],
+        secure_cookies: true,
+        same_site: SameSite::Lax,
+        protected_methods: vec![Method::POST, Method::PUT, Method::DELETE, Method::PATCH],
+        excluded_paths: vec![],
+        excluded_path_prefixes: vec![],
         max_tokens_per_session: 10,
-        token_regeneration_interval: 300, // 5 minutes
+        token_regeneration_interval: 300, // 5 minutes default
         enable_risk_based_validation: true,
         risk_threshold: 0.7,
         enable_behavioral_analytics: true,
@@ -859,21 +846,12 @@ pub fn create_csrf_protection(redis: Arc<RedisManager>, config: &Config) -> Csrf
 
 // Utility functions
 
-/// Generate a cryptographically secure random token
-fn generate_secure_token() -> String {
-    let mut bytes = [0u8; 32];
-    thread_rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-/// Generate a secure ID
 fn generate_secure_id() -> String {
     let mut bytes = [0u8; 16];
     thread_rng().fill_bytes(&mut bytes);
-    URL_SAFE_NO_PAD.encode(bytes)
+    URL_SAFE_NO_PAD.encode(&bytes)
 }
 
-/// Get current timestamp in seconds
 fn current_timestamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -881,24 +859,14 @@ fn current_timestamp() -> u64 {
         .as_secs()
 }
 
-/// SHA256 hash function
-fn sha256_hash(input: &str) -> String {
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
-}
-
-/// Constant-time string comparison to prevent timing attacks
 fn constant_time_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-
+    
     let mut result = 0u8;
-    for (byte_a, byte_b) in a.bytes().zip(b.bytes()) {
-        result |= byte_a ^ byte_b;
+    for (a_byte, b_byte) in a.bytes().zip(b.bytes()) {
+        result |= a_byte ^ b_byte;
     }
-
     result == 0
 }

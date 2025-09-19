@@ -19,6 +19,7 @@ use crate::models::security::{
     SessionMetrics, SecurityAction, RiskAssessment, EventSeverity as SecurityEventSeverity,
     SessionActivity, ActivityType,
 };
+use super::utils::{is_expired, generate_secure_token, default_hash};
 
 /// Session manager with Redis backend and security features
 #[derive(Clone)]
@@ -349,7 +350,7 @@ impl SessionManager {
         };
 
         // Check if session is expired
-        if session.is_expired() {
+        if is_expired(session.expires_at.timestamp() as u64) {
             validation_errors.push(ValidationError::SessionExpired);
         }
 
@@ -369,8 +370,8 @@ impl SessionManager {
 
         // Check device validation if enforced
         if self.config.enforce_device_validation {
-            let device_hash = self.hash_user_agent(user_agent);
-            let session_device_hash = self.hash_user_agent(&session.user_agent);
+            let device_hash = default_hash(user_agent);
+            let session_device_hash = default_hash(&session.user_agent);
             
             if device_hash != session_device_hash {
                 security_warnings.push(SecurityWarning::NewDevice);
@@ -744,15 +745,6 @@ impl SessionManager {
             .map_err(|e| AppError::internal(&format!("Redis ltrim failed: {}", e)))?;
 
         Ok(())
-    }
-
-    fn hash_user_agent(&self, user_agent: &str) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        
-        let mut hasher = DefaultHasher::new();
-        user_agent.hash(&mut hasher);
-        format!("{:x}", hasher.finish())
     }
 }
 
