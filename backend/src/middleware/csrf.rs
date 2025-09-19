@@ -20,7 +20,7 @@ use crate::{
     database::RedisManager,
     errors::AppError,
     auth::{
-        behavioral::{BehaviorAnalytics, GeoLocation, ThreatAction},
+        behavioral::{BehaviorAnalytics, GeoLocation},
         threat::{ThreatDetectionEngine, ThreatEvaluationResult},
         audit::{AuditEvent, AuditEventType, EventOutcome, EventSeverity},
         ses::{SessionManager, SecurityEventType},

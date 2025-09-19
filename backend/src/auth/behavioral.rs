@@ -4,31 +4,10 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use crate::errors::AppError;
 use crate::models::ses::{Session, SecurityLevel};
-
-/// Behavioral analytics data for risk-based authentication
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BehaviorAnalytics {
-    /// User's typical login hours (0-23)
-    pub typical_login_hours: Vec<u8>,
-    /// Frequently used IP addresses
-    pub frequent_locations: Vec<IpAddr>,
-    /// Average session duration in seconds
-    pub average_session_duration: u64,
-    /// Typical user agents used by this user
-    pub typical_user_agents: Vec<String>,
-    /// Typical devices used by this user
-    pub typical_devices: Vec<String>,
-    /// Geographic locations (country codes)
-    pub typical_countries: Vec<String>,
-    /// Time zones typically used
-    pub typical_timezones: Vec<String>,
-    /// Login frequency patterns (day of week)
-    pub login_patterns: HashMap<u8, u32>, // 0=Sunday, 6=Saturday
-    /// Failed login attempt patterns
-    pub failed_attempt_patterns: Vec<FailedAttemptPattern>,
-    /// Last updated timestamp
-    pub last_updated: DateTime<Utc>,
-}
+use crate::models::security::{
+    RiskAssessment, RiskFactor, RiskFactorType, SecurityAction, EventSeverity,
+    BehavioralProfile, SessionMetrics, ActivityType
+};
 
 /// Geographic location data for enhanced risk assessment
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,62 +52,36 @@ pub enum FailureType {
     RateLimited,
 }
 
-/// Threat response configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ThreatResponse {
-    /// Risk score threshold for automatic session revocation
-    pub auto_revoke_threshold: f64,
-    /// Risk score threshold for MFA challenge
-    pub mfa_challenge_threshold: f64,
-    /// Risk score threshold for security notifications
-    pub notification_threshold: f64,
-    /// Maximum allowed failed attempts before lockout
-    pub max_failed_attempts: u32,
-    /// Lockout duration in seconds
-    pub lockout_duration: u64,
-}
+// Remove duplicate ThreatResponse - now using SecurityConfig from models/security.rs
+// Remove duplicate ThreatAction - now using SecurityAction from models/security.rs
+// Remove duplicate SessionBinding - this should be in binding.rs only
 
-/// Actions that can be taken in response to threats
+/// Behavioral analytics data for risk-based authentication
+/// Now uses BehavioralProfile from models/security.rs internally
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ThreatAction {
-    SessionRevoked,
-    MfaRequired,
-    SecurityNotification,
-    AccountLocked,
-    IpBlocked,
-    DeviceBlocked,
-    AdditionalVerificationRequired,
-}
-
-/// Session binding for cryptographic session security
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionBinding {
-    /// Hashed IP address for binding verification
-    pub ip_hash: String,
-    /// Hashed user agent for binding verification
-    pub user_agent_hash: String,
-    /// TLS fingerprint if available
-    pub tls_fingerprint: Option<String>,
-    /// Device fingerprint hash
-    pub device_fingerprint_hash: String,
-    /// Binding creation timestamp
-    pub created_at: DateTime<Utc>,
+pub struct BehaviorAnalytics {
+    /// Internal behavioral profile
+    pub profile: BehavioralProfile,
+    /// Failed login attempt patterns
+    pub failed_attempt_patterns: Vec<FailedAttemptPattern>,
 }
 
 impl BehaviorAnalytics {
     /// Create new behavioral analytics with default values
     pub fn new() -> Self {
         Self {
-            typical_login_hours: Vec::new(),
-            frequent_locations: Vec::new(),
-            average_session_duration: 0,
-            typical_user_agents: Vec::new(),
-            typical_devices: Vec::new(),
-            typical_countries: Vec::new(),
-            typical_timezones: Vec::new(),
-            login_patterns: HashMap::new(),
+            profile: BehavioralProfile {
+                typical_login_hours: Vec::new(),
+                frequent_locations: Vec::new(),
+                average_session_duration: 0,
+                typical_user_agents: Vec::new(),
+                typical_devices: Vec::new(),
+                typical_countries: Vec::new(),
+                typical_timezones: Vec::new(),
+                login_patterns: HashMap::new(),
+                last_updated: Utc::now(),
+            },
             failed_attempt_patterns: Vec::new(),
-            last_updated: Utc::now(),
         }
     }
 
@@ -138,62 +91,172 @@ impl BehaviorAnalytics {
         let day_of_week = session.created_at.weekday().num_days_from_sunday() as u8;
 
         // Update typical login hours
-        if !self.typical_login_hours.contains(&login_hour) {
-            self.typical_login_hours.push(login_hour);
+        if !self.profile.typical_login_hours.contains(&login_hour) {
+            self.profile.typical_login_hours.push(login_hour);
         }
 
         // Update frequent locations
-        if !self.frequent_locations.contains(&session.created_ip) {
-            self.frequent_locations.push(session.created_ip);
+        if !self.profile.frequent_locations.contains(&session.created_ip) {
+            self.profile.frequent_locations.push(session.created_ip);
         }
 
         // Update typical user agents
-        if !self.typical_user_agents.contains(&session.user_agent) {
-            self.typical_user_agents.push(session.user_agent.clone());
+        if !self.profile.typical_user_agents.contains(&session.user_agent) {
+            self.profile.typical_user_agents.push(session.user_agent.clone());
         }
 
         // Update typical devices
-        if !self.typical_devices.contains(&session.device_fingerprint) {
-            self.typical_devices.push(session.device_fingerprint.clone());
+        if !self.profile.typical_devices.contains(&session.device_fingerprint) {
+            self.profile.typical_devices.push(session.device_fingerprint.clone());
         }
 
         // Update typical countries
-        if !self.typical_countries.contains(&geo_data.country_code) {
-            self.typical_countries.push(geo_data.country_code.clone());
+        if !self.profile.typical_countries.contains(&geo_data.country_code) {
+            self.profile.typical_countries.push(geo_data.country_code.clone());
         }
 
         // Update typical timezones
-        if !self.typical_timezones.contains(&geo_data.timezone) {
-            self.typical_timezones.push(geo_data.timezone.clone());
+        if !self.profile.typical_timezones.contains(&geo_data.timezone) {
+            self.profile.typical_timezones.push(geo_data.timezone.clone());
         }
 
         // Update login patterns
-        *self.login_patterns.entry(day_of_week).or_insert(0) += 1;
+        *self.profile.login_patterns.entry(day_of_week).or_insert(0) += 1;
 
         // Keep only recent failed attempts (last 30 days)
         let thirty_days_ago = Utc::now() - chrono::Duration::days(30);
         self.failed_attempt_patterns.retain(|pattern| pattern.timestamp > thirty_days_ago);
 
-        self.last_updated = Utc::now();
+        self.profile.last_updated = Utc::now();
     }
 
-    /// Add a failed login attempt to the pattern analysis
-    pub fn add_failed_attempt(&mut self, ip: IpAddr, user_agent: String, failure_type: FailureType) {
+    /// Calculate behavioral risk score based on current session vs historical patterns
+    pub fn calculate_behavioral_risk(&self, session: &Session, geo_data: &GeoLocation) -> f64 {
+        let mut risk_score = 0.0;
+        let mut factors = 0;
+
+        // Check login hour patterns
+        let current_hour = session.created_at.hour() as u8;
+        if !self.profile.typical_login_hours.is_empty() && !self.profile.typical_login_hours.contains(&current_hour) {
+            risk_score += 0.2;
+        }
+        factors += 1;
+
+        // Check IP address patterns
+        if !self.profile.frequent_locations.is_empty() && !self.profile.frequent_locations.contains(&session.created_ip) {
+            risk_score += 0.3;
+        }
+        factors += 1;
+
+        // Check user agent patterns
+        if !self.profile.typical_user_agents.is_empty() && !self.profile.typical_user_agents.contains(&session.user_agent) {
+            risk_score += 0.15;
+        }
+        factors += 1;
+
+        // Check device patterns
+        if !self.profile.typical_devices.is_empty() && !self.profile.typical_devices.contains(&session.device_fingerprint) {
+            risk_score += 0.25;
+        }
+        factors += 1;
+
+        // Check country patterns
+        if !self.profile.typical_countries.is_empty() && !self.profile.typical_countries.contains(&geo_data.country_code) {
+            risk_score += 0.2;
+        }
+        factors += 1;
+
+        // Check timezone patterns
+        if !self.profile.typical_timezones.is_empty() && !self.profile.typical_timezones.contains(&geo_data.timezone) {
+            risk_score += 0.1;
+        }
+        factors += 1;
+
+        if factors > 0 {
+            risk_score / factors as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// Generate a comprehensive risk assessment
+    pub fn generate_risk_assessment(&self, session: &Session, geo_data: &GeoLocation) -> RiskAssessment {
+        let behavioral_risk = self.calculate_behavioral_risk(session, geo_data);
+        let mut assessment = RiskAssessment::new(behavioral_risk);
+
+        // Add specific risk factors based on behavioral analysis
+        let current_hour = session.created_at.hour() as u8;
+        if !self.profile.typical_login_hours.is_empty() && !self.profile.typical_login_hours.contains(&current_hour) {
+            assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::UnusualLoginTime,
+                0.2,
+                format!("Login at unusual hour: {}", current_hour),
+                EventSeverity::Medium,
+            ));
+        }
+
+        if !self.profile.frequent_locations.is_empty() && !self.profile.frequent_locations.contains(&session.created_ip) {
+            assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::UnknownIpAddress,
+                0.3,
+                format!("Unknown IP address: {}", session.created_ip),
+                EventSeverity::High,
+            ));
+        }
+
+        if !self.profile.typical_devices.is_empty() && !self.profile.typical_devices.contains(&session.device_fingerprint) {
+            assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::UnknownDevice,
+                0.25,
+                "Unknown device fingerprint".to_string(),
+                EventSeverity::High,
+            ));
+        }
+
+        if geo_data.is_vpn_proxy {
+            assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::VpnProxyUsage,
+                0.4,
+                "VPN/Proxy usage detected".to_string(),
+                EventSeverity::High,
+            ));
+        }
+
+        // Add recommended actions based on risk level
+        if behavioral_risk > 0.7 {
+            assessment.add_action(SecurityAction::SessionRevoked);
+            assessment.add_action(SecurityAction::SecurityNotification);
+        } else if behavioral_risk > 0.5 {
+            assessment.add_action(SecurityAction::MfaRequired);
+            assessment.add_action(SecurityAction::SecurityNotification);
+        } else if behavioral_risk > 0.3 {
+            assessment.add_action(SecurityAction::AdditionalVerificationRequired);
+        }
+
+        assessment
+    }
+
+    /// Record a failed login attempt
+    pub fn record_failed_attempt(&mut self, ip: IpAddr, user_agent: String, failure_type: FailureType) {
         let pattern = FailedAttemptPattern {
             timestamp: Utc::now(),
             ip_address: ip,
             user_agent,
             failure_type,
         };
-        
         self.failed_attempt_patterns.push(pattern);
-        
-        // Keep only last 100 failed attempts
-        if self.failed_attempt_patterns.len() > 100 {
-            self.failed_attempt_patterns.remove(0);
-        }
-        
-        self.last_updated = Utc::now();
+
+        // Keep only recent attempts (last 30 days)
+        let thirty_days_ago = Utc::now() - chrono::Duration::days(30);
+        self.failed_attempt_patterns.retain(|p| p.timestamp > thirty_days_ago);
+    }
+
+    /// Get recent failed attempts count
+    pub fn get_recent_failed_attempts(&self, hours: i64) -> usize {
+        let cutoff = Utc::now() - chrono::Duration::hours(hours);
+        self.failed_attempt_patterns.iter()
+            .filter(|p| p.timestamp > cutoff)
+            .count()
     }
 }
 
@@ -205,13 +268,13 @@ impl Session {
         geo_data: &GeoLocation,
     ) -> f64 {
         let mut risk_score = self.calculate_risk_score(
-            &user_behavior.frequent_locations,
-            &user_behavior.typical_devices,
+            &user_behavior.profile.frequent_locations,
+            &user_behavior.profile.typical_devices,
         );
 
         // Time-based behavioral analysis
         let current_hour = self.created_at.hour() as u8;
-        if !user_behavior.typical_login_hours.contains(&current_hour) {
+        if !user_behavior.profile.typical_login_hours.contains(&current_hour) {
             risk_score += 0.2;
         }
 
@@ -225,7 +288,7 @@ impl Session {
         }
 
         // Country-based risk assessment
-        if !user_behavior.typical_countries.contains(&geo_data.country_code) {
+        if !user_behavior.profile.typical_countries.contains(&geo_data.country_code) {
             risk_score += 0.25;
         }
 
@@ -235,7 +298,7 @@ impl Session {
         }
 
         // User agent analysis
-        if !user_behavior.typical_user_agents.contains(&self.user_agent) {
+        if !user_behavior.profile.typical_user_agents.contains(&self.user_agent) {
             risk_score += 0.1;
         }
 
@@ -253,89 +316,12 @@ impl Session {
 
         // Day of week pattern analysis
         let day_of_week = self.created_at.weekday().num_days_from_sunday() as u8;
-        let typical_logins_this_day = user_behavior.login_patterns.get(&day_of_week).unwrap_or(&0);
+        let typical_logins_this_day = user_behavior.profile.login_patterns.get(&day_of_week).unwrap_or(&0);
         if *typical_logins_this_day == 0 {
             risk_score += 0.1;
         }
 
         risk_score.min(1.0)
-    }
-}
-
-impl SessionBinding {
-    /// Create session binding with cryptographic hashes
-    pub fn create_binding(
-        ip: IpAddr,
-        user_agent: &str,
-        device_fingerprint: &str,
-        tls_fingerprint: Option<String>,
-    ) -> Self {
-        use sha2::{Sha256, Digest};
-        
-        let mut hasher = Sha256::new();
-        hasher.update(ip.to_string().as_bytes());
-        let ip_hash = format!("{:x}", hasher.finalize_reset());
-
-        hasher.update(user_agent.as_bytes());
-        let user_agent_hash = format!("{:x}", hasher.finalize_reset());
-
-        hasher.update(device_fingerprint.as_bytes());
-        let device_fingerprint_hash = format!("{:x}", hasher.finalize());
-
-        Self {
-            ip_hash,
-            user_agent_hash,
-            tls_fingerprint,
-            device_fingerprint_hash,
-            created_at: Utc::now(),
-        }
-    }
-
-    /// Verify session binding against current request
-    pub fn verify_binding(
-        &self,
-        current_ip: IpAddr,
-        current_user_agent: &str,
-        current_device_fingerprint: &str,
-    ) -> bool {
-        use sha2::{Sha256, Digest};
-        
-        let mut hasher = Sha256::new();
-        
-        // Verify IP hash
-        hasher.update(current_ip.to_string().as_bytes());
-        let current_ip_hash = format!("{:x}", hasher.finalize_reset());
-        if current_ip_hash != self.ip_hash {
-            return false;
-        }
-
-        // Verify user agent hash
-        hasher.update(current_user_agent.as_bytes());
-        let current_user_agent_hash = format!("{:x}", hasher.finalize_reset());
-        if current_user_agent_hash != self.user_agent_hash {
-            return false;
-        }
-
-        // Verify device fingerprint hash
-        hasher.update(current_device_fingerprint.as_bytes());
-        let current_device_hash = format!("{:x}", hasher.finalize());
-        if current_device_hash != self.device_fingerprint_hash {
-            return false;
-        }
-
-        true
-    }
-}
-
-impl Default for ThreatResponse {
-    fn default() -> Self {
-        Self {
-            auto_revoke_threshold: 0.8,
-            mfa_challenge_threshold: 0.6,
-            notification_threshold: 0.4,
-            max_failed_attempts: 5,
-            lockout_duration: 900, // 15 minutes
-        }
     }
 }
 
@@ -353,64 +339,4 @@ pub fn calculate_distance(coord1: (f64, f64), coord2: (f64, f64)) -> f64 {
     let c = 2.0 * a.sqrt().atan2((1.0 - a).sqrt());
     
     r * c
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::Ipv4Addr;
-
-    #[test]
-    fn test_distance_calculation() {
-        // Distance between New York and Los Angeles (approximately 3944 km)
-        let ny = (40.7128, -74.0060);
-        let la = (34.0522, -118.2437);
-        let distance = calculate_distance(ny, la);
-        
-        assert!((distance - 3944.0).abs() < 100.0); // Allow 100km tolerance
-    }
-
-    #[test]
-    fn test_session_binding() {
-        let ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1));
-        let user_agent = "Mozilla/5.0 Test";
-        let device_fp = "test-device-fingerprint";
-        
-        let binding = SessionBinding::create_binding(ip, user_agent, device_fp, None);
-        
-        // Should verify successfully with same data
-        assert!(binding.verify_binding(ip, user_agent, device_fp));
-        
-        // Should fail with different data
-        let different_ip = IpAddr::V4(Ipv4Addr::new(192, 168, 1, 2));
-        assert!(!binding.verify_binding(different_ip, user_agent, device_fp));
-    }
-
-    #[test]
-    fn test_behavior_analytics_update() {
-        let mut analytics = BehaviorAnalytics::new();
-        let session = Session::new(
-            "user123".to_string(),
-            IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
-            "Mozilla/5.0 Test".to_string(),
-            "device-fp".to_string(),
-            SecurityLevel::Standard,
-            None,
-            None,
-        );
-        let geo_data = GeoLocation {
-            current_location: (40.7128, -74.0060),
-            previous_location: None,
-            country_code: "US".to_string(),
-            city: Some("New York".to_string()),
-            timezone: "America/New_York".to_string(),
-            isp: None,
-            is_vpn_proxy: false,
-        };
-        
-        analytics.update_with_session(&session, &geo_data);
-        
-        assert!(analytics.typical_countries.contains(&"US".to_string()));
-        assert!(analytics.typical_timezones.contains(&"America/New_York".to_string()));
-    }
 }

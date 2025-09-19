@@ -3,6 +3,7 @@
 bin
 *.out
 pkg/
+logs/
 target/
 **/*.rs.bk
 Cargo.lock

@@ -1,7 +1,6 @@
 use dotenvy::dotenv;
 use std::env;
 use std::fs;
-use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct Config {

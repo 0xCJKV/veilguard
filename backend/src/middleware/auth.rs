@@ -233,7 +233,7 @@ pub async fn auth_middleware(
 
                                                     // Check if session was revoked
                                                     let session_revoked = actions.iter().any(|action| {
-                                                        matches!(action, crate::auth::behavioral::ThreatAction::SessionRevoked)
+                                                        matches!(action, crate::models::security::SecurityAction::SessionRevoked)
                                                     });
                                                      
                                                     if session_revoked {

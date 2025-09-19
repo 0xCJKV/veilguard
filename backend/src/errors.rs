@@ -40,6 +40,23 @@ pub enum AppError {
     SessionCreationFailed(String),
     RedisConnectionError(String),
     
+    // Security-related errors for consolidated structures
+    SecurityConfigError(String),
+    RiskAssessmentFailed(String),
+    ThreatDetectionError(String),
+    BehavioralAnalysisError(String),
+    SessionBindingError(String),
+    DeviceFingerprintError(String),
+    SecurityActionFailed(String),
+    
+    // Metrics and analytics errors
+    MetricsCollectionError(String),
+    AnalyticsError(String),
+    
+    // Configuration errors for unified structures
+    ConfigurationError(String),
+    ThresholdValidationError(String),
+    
     // General errors
     InternalServerError(String),
     BadRequest(String),
@@ -78,6 +95,23 @@ impl fmt::Display for AppError {
             AppError::SessionConcurrencyLimitExceeded => write!(f, "Session concurrency limit exceeded"),
             AppError::SessionCreationFailed(msg) => write!(f, "Session creation failed: {}", msg),
             AppError::RedisConnectionError(msg) => write!(f, "Redis connection error: {}", msg),
+            
+            // Security-related errors for consolidated structures
+            AppError::SecurityConfigError(msg) => write!(f, "Security configuration error: {}", msg),
+            AppError::RiskAssessmentFailed(msg) => write!(f, "Risk assessment failed: {}", msg),
+            AppError::ThreatDetectionError(msg) => write!(f, "Threat detection error: {}", msg),
+            AppError::BehavioralAnalysisError(msg) => write!(f, "Behavioral analysis error: {}", msg),
+            AppError::SessionBindingError(msg) => write!(f, "Session binding error: {}", msg),
+            AppError::DeviceFingerprintError(msg) => write!(f, "Device fingerprint error: {}", msg),
+            AppError::SecurityActionFailed(msg) => write!(f, "Security action failed: {}", msg),
+            
+            // Metrics and analytics errors
+            AppError::MetricsCollectionError(msg) => write!(f, "Metrics collection error: {}", msg),
+            AppError::AnalyticsError(msg) => write!(f, "Analytics error: {}", msg),
+            
+            // Configuration errors for unified structures
+            AppError::ConfigurationError(msg) => write!(f, "Configuration error: {}", msg),
+            AppError::ThresholdValidationError(msg) => write!(f, "Threshold validation error: {}", msg),
             
             // General errors
             AppError::InternalServerError(msg) => write!(f, "Internal server error: {}", msg),
@@ -220,6 +254,100 @@ impl IntoResponse for AppError {
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "Redis connection error".to_string(),
                     "Internal server error".to_string()
+                )
+            },
+            
+            // Security-related errors
+            AppError::SecurityConfigError(msg) => {
+                tracing::error!("Security configuration error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Security configuration error".to_string(),
+                    "Internal server error".to_string()
+                )
+            },
+            AppError::RiskAssessmentFailed(msg) => {
+                tracing::warn!("Risk assessment failed: {}", msg);
+                (
+                    StatusCode::FORBIDDEN,
+                    "Risk assessment failed".to_string(),
+                    "Access denied due to security risk".to_string()
+                )
+            },
+            AppError::ThreatDetectionError(msg) => {
+                tracing::error!("Threat detection error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Threat detection error".to_string(),
+                    "Internal server error".to_string()
+                )
+            },
+            AppError::BehavioralAnalysisError(msg) => {
+                tracing::error!("Behavioral analysis error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Behavioral analysis error".to_string(),
+                    "Internal server error".to_string()
+                )
+            },
+            AppError::SessionBindingError(msg) => {
+                tracing::warn!("Session binding error: {}", msg);
+                (
+                    StatusCode::FORBIDDEN,
+                    "Session binding error".to_string(),
+                    "Session security validation failed".to_string()
+                )
+            },
+            AppError::DeviceFingerprintError(msg) => {
+                tracing::warn!("Device fingerprint error: {}", msg);
+                (
+                    StatusCode::FORBIDDEN,
+                    "Device fingerprint error".to_string(),
+                    "Device validation failed".to_string()
+                )
+            },
+            AppError::SecurityActionFailed(msg) => {
+                tracing::error!("Security action failed: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Security action failed".to_string(),
+                    "Security operation failed".to_string()
+                )
+            },
+            
+            // Metrics and analytics errors
+            AppError::MetricsCollectionError(msg) => {
+                tracing::error!("Metrics collection error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Metrics collection error".to_string(),
+                    "Internal server error".to_string()
+                )
+            },
+            AppError::AnalyticsError(msg) => {
+                tracing::error!("Analytics error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Analytics error".to_string(),
+                    "Internal server error".to_string()
+                )
+            },
+            
+            // Configuration errors
+            AppError::ConfigurationError(msg) => {
+                tracing::error!("Configuration error: {}", msg);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Configuration error".to_string(),
+                    "Internal server error".to_string()
+                )
+            },
+            AppError::ThresholdValidationError(msg) => {
+                tracing::warn!("Threshold validation error: {}", msg);
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Threshold validation error".to_string(),
+                    "Invalid threshold configuration".to_string()
                 )
             },
             

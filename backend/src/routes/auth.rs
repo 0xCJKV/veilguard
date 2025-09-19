@@ -11,7 +11,7 @@ use serde_json::Value;
 use crate::{
     auth::{
         hash_password, verify_password, PasetoManager, ses::SessionManager,
-        behavioral::{BehaviorAnalytics, GeoLocation, ThreatAction},
+        behavioral::{BehaviorAnalytics, GeoLocation},
         binding::{SessionBindingManager, DeviceFingerprint, TlsFingerprint},
         threat::ThreatDetectionEngine,
         audit::{AuditManager, AuditEvent, AuditEventType, EventOutcome, EventSeverity},
@@ -22,7 +22,7 @@ use crate::{
     },
     config::Config,
     database::{users, DbPool, redis::RedisManager},
-    models::{CreateUserRequest, LoginRequest, UserResponse, ses::SecurityLevel},
+    models::{CreateUserRequest, LoginRequest, UserResponse, ses::SecurityLevel, security::SecurityAction},
     errors::{AppError, Result},
 };
 

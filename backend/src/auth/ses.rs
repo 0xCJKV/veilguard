@@ -13,8 +13,11 @@ use crate::database::redis::RedisManager;
 use crate::auth::audit::{AuditManager, AuditEventType, EventOutcome, EventSeverity};
 use crate::models::ses::{
     Session, SessionConfig, SessionValidationResult, ValidationError, SecurityWarning,
-    SecurityLevel, ActivityType, SessionActivity, CreateSessionRequest, SessionFlags,
-    SessionMetadata,
+    SecurityLevel, CreateSessionRequest, SessionFlags, SessionMetadata,
+};
+use crate::models::security::{
+    SessionMetrics, SecurityAction, RiskAssessment, EventSeverity as SecurityEventSeverity,
+    SessionActivity, ActivityType,
 };
 
 /// Session manager with Redis backend and security features
@@ -37,7 +40,7 @@ pub struct SecurityManager {
     failed_attempts: RwLock<HashMap<String, u32>>,
 }
 
-/// Session analytics and monitoring
+/// Session analytics and monitoring (now using SessionMetrics from models/security.rs)
 #[derive(Debug)]
 pub struct SessionAnalytics {
     login_attempts: RwLock<HashMap<String, u32>>,
@@ -74,15 +77,7 @@ pub enum SecurityEventType {
     TokenRotated,
 }
 
-/// Session metrics for analytics
-#[derive(Debug, Default)]
-pub struct SessionMetrics {
-    pub total_sessions: usize,
-    pub active_sessions: usize,
-    pub suspicious_sessions: usize,
-    pub sessions_by_security_level: HashMap<String, usize>,
-    pub recent_activities: Vec<SessionActivity>,
-}
+// Remove duplicate SessionMetrics - now using from models/security.rs
 
 /// Device fingerprinting for security validation
 #[derive(Debug, Clone)]
@@ -96,7 +91,7 @@ pub struct DeviceFingerprinting {
     pub canvas_fingerprint: Option<String>,
 }
 
-/// Risk assessment result
+/// Risk assessment result (simplified - using RiskAssessment from models/security.rs for core logic)
 #[derive(Debug)]
 pub struct SecurityRisk {
     pub risk_score: f64,
@@ -878,18 +873,85 @@ impl SessionAnalytics {
             metrics.suspicious_sessions += 1;
         }
 
+        // Update sessions by security level using the consolidated structure
         let level_key = format!("{:?}", session.security_level);
         *metrics.sessions_by_security_level.entry(level_key).or_insert(0) += 1;
+
+        // Add recent activity to the consolidated metrics
+        let activity = SessionActivity {
+            session_id: session.id.clone(),
+            activity_type: ActivityType::SessionCreated,
+            timestamp: Utc::now(),
+            ip_address: session.created_ip,
+            user_agent: session.user_agent.clone(),
+            details: HashMap::new(),
+        };
+        
+        metrics.recent_activities.push(activity);
+        
+        // Keep only last 100 activities
+        if metrics.recent_activities.len() > 100 {
+            metrics.recent_activities.remove(0);
+        }
     }
 
     async fn get_metrics(&self) -> Result<SessionMetrics, AppError> {
         let metrics = self.session_metrics.read().await;
-        Ok(SessionMetrics {
-            total_sessions: metrics.total_sessions,
-            active_sessions: metrics.active_sessions,
-            suspicious_sessions: metrics.suspicious_sessions,
-            sessions_by_security_level: metrics.sessions_by_security_level.clone(),
-            recent_activities: metrics.recent_activities.clone(),
-        })
+        Ok(metrics.clone())
+    }
+
+    /// Update metrics for session validation
+    async fn update_validation_metrics(&self, session_id: &str, is_valid: bool) {
+        if is_valid {
+            // Add validation activity
+            let mut metrics = self.session_metrics.write().await;
+            let activity = SessionActivity {
+                session_id: session_id.to_string(),
+                activity_type: ActivityType::SecurityValidation,
+                timestamp: Utc::now(),
+                ip_address: "0.0.0.0".parse().unwrap(), // Placeholder - should be passed from caller
+                user_agent: "Unknown".to_string(),
+                details: HashMap::new(),
+            };
+            
+            metrics.recent_activities.push(activity);
+            
+            // Keep only last 100 activities
+            if metrics.recent_activities.len() > 100 {
+                metrics.recent_activities.remove(0);
+            }
+        }
+    }
+
+    /// Update metrics for session revocation
+    async fn update_revocation_metrics(&self, session_id: &str, reason: Option<&str>) {
+        let mut metrics = self.session_metrics.write().await;
+        
+        // Decrease active sessions count
+        if metrics.active_sessions > 0 {
+            metrics.active_sessions -= 1;
+        }
+        
+        // Add revocation activity
+        let mut details = HashMap::new();
+        if let Some(reason) = reason {
+            details.insert("reason".to_string(), reason.to_string());
+        }
+        
+        let activity = SessionActivity {
+            session_id: session_id.to_string(),
+            activity_type: ActivityType::SessionRevoked,
+            timestamp: Utc::now(),
+            ip_address: "0.0.0.0".parse().unwrap(), // Placeholder
+            user_agent: "System".to_string(),
+            details,
+        };
+        
+        metrics.recent_activities.push(activity);
+        
+        // Keep only last 100 activities
+        if metrics.recent_activities.len() > 100 {
+            metrics.recent_activities.remove(0);
+        }
     }
 }
