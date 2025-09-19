@@ -28,6 +28,7 @@ pub enum AppError {
     Unauthorized,
     Forbidden,
     TokenError(String),
+    SecurityViolation(String),
     
     // Session errors
     SessionNotFound(String),
@@ -66,6 +67,7 @@ impl fmt::Display for AppError {
             AppError::Unauthorized => write!(f, "Unauthorized access"),
             AppError::Forbidden => write!(f, "Forbidden access"),
             AppError::TokenError(msg) => write!(f, "Token error: {}", msg),
+            AppError::SecurityViolation(msg) => write!(f, "Security violation: {}", msg),
             
             // Session errors
             AppError::SessionNotFound(id) => write!(f, "Session not found: {}", id),
@@ -159,6 +161,14 @@ impl IntoResponse for AppError {
                     StatusCode::UNAUTHORIZED,
                     "Token validation failed".to_string(),
                     "Invalid or expired token".to_string()
+                )
+            },
+            AppError::SecurityViolation(msg) => {
+                tracing::warn!("Security violation: {}", msg);
+                (
+                    StatusCode::FORBIDDEN,
+                    "Security violation detected".to_string(),
+                    "Access denied due to security violation".to_string()
                 )
             },
             

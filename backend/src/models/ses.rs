@@ -40,7 +40,7 @@ pub struct Session {
 }
 
 /// Security levels for sessions
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Hash)]
 pub enum SecurityLevel {
     /// Low security - basic authentication
     Low,
@@ -48,6 +48,8 @@ pub enum SecurityLevel {
     Standard,
     /// High security - sensitive operations
     High,
+    /// Critical security - highest level operations
+    Critical,
     /// Administrative - admin operations
     Administrative,
 }
@@ -104,6 +106,31 @@ pub struct CreateSessionRequest {
     pub login_method: String,
     pub security_level: Option<SecurityLevel>,
     pub metadata: Option<HashMap<String, String>>,
+}
+
+/// Request for refreshing a session
+#[derive(Debug, Deserialize)]
+pub struct RefreshSessionRequest {
+    pub extend_duration: Option<i64>, // Duration in seconds to extend the session
+}
+
+/// Request for revoking a session
+#[derive(Debug, Deserialize)]
+pub struct RevokeSessionRequest {
+    pub reason: Option<String>,
+    pub revoke_all_user_sessions: Option<bool>,
+}
+
+/// Response for session validation
+#[derive(Debug, Serialize)]
+pub struct ValidationResponse {
+    pub is_valid: bool,
+    pub session_id: Option<String>,
+    pub user_id: Option<String>,
+    pub security_level: Option<SecurityLevel>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub warnings: Vec<String>,
+    pub session: Option<crate::routes::ses::SessionSummary>,
 }
 
 /// Result of session validation
@@ -222,6 +249,7 @@ impl Session {
             SecurityLevel::Standard => now + chrono::Duration::hours(8),
             SecurityLevel::High => now + chrono::Duration::hours(2),
             SecurityLevel::Administrative => now + chrono::Duration::hours(1),
+            SecurityLevel::Critical => now + chrono::Duration::minutes(30), // Shortest expiration for critical level
         };
 
         Self {

@@ -6,6 +6,8 @@ mod middleware;
 mod models;
 mod routes;
 
+use auth::{audit::AuditManager, PasetoManager, behavioral::BehaviorAnalytics, binding::SessionBindingManager, threat::ThreatDetectionEngine};
+
 use axum::{
     extract::Extension,
     routing::{get, post, put, delete},
@@ -75,6 +77,28 @@ async fn main() {
         }
     };
     
+    // Initialize audit manager
+    let audit_manager = Arc::new(AuditManager::new());
+    println!("✅ Audit manager initialized successfully");
+    
+    // Initialize PASETO manager
+    let paseto_manager = Arc::new(PasetoManager::new(&config));
+    println!("✅ PASETO manager initialized successfully");
+    
+    // Initialize behavior analytics
+    let behavior_analytics = Arc::new(BehaviorAnalytics::new());
+    println!("✅ Behavior analytics initialized successfully");
+    
+    // Initialize SessionBindingManager
+    let binding_config = auth::binding::BindingConfig::default();
+    let session_binding_manager = Arc::new(SessionBindingManager::new(binding_config));
+    println!("✅ SessionBindingManager initialized successfully");
+
+    // Initialize ThreatDetectionEngine
+    let threat_config = auth::behavioral::ThreatResponse::default();
+    let threat_engine = Arc::new(ThreatDetectionEngine::new(threat_config, audit_manager.clone()));
+    println!("✅ ThreatDetectionEngine initialized successfully");
+    
     println!("🚀 Starting server at http://{}", bind_address);
 
     // Build the application with routes and middleware
@@ -90,6 +114,11 @@ async fn main() {
                 .layer(Extension(csrf_protection.clone()))
                 .layer(Extension(rate_limiter))
                 .layer(Extension(session_manager))
+                .layer(Extension(audit_manager))
+                .layer(Extension(paseto_manager))
+                .layer(Extension(behavior_analytics))
+        .layer(Extension(session_binding_manager))
+        .layer(Extension(threat_engine))
         )
         .with_state(csrf_protection);
 

@@ -3,12 +3,14 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use chrono::{DateTime, Utc, Duration};
 use redis::{AsyncCommands, RedisResult};
+use serde::{Serialize, Deserialize};
 use serde_json;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::errors::AppError;
 use crate::database::redis::RedisManager;
+use crate::auth::audit::{AuditManager, AuditEventType, EventOutcome, EventSeverity};
 use crate::models::ses::{
     Session, SessionConfig, SessionValidationResult, ValidationError, SecurityWarning,
     SecurityLevel, ActivityType, SessionActivity, CreateSessionRequest, SessionFlags,
@@ -23,6 +25,7 @@ pub struct SessionManager {
     security: Arc<SecurityManager>,
     analytics: Arc<SessionAnalytics>,
     redis_manager: Option<Arc<RedisManager>>,
+    audit_manager: Arc<AuditManager>,
 }
 
 /// Security manager for session validation and risk assessment
@@ -43,7 +46,7 @@ pub struct SessionAnalytics {
 }
 
 /// Security event tracking
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityEvent {
     pub event_type: SecurityEventType,
     pub user_id: String,
@@ -54,7 +57,7 @@ pub struct SecurityEvent {
 }
 
 /// Types of security events
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum SecurityEventType {
     LoginAttempt,
     LoginSuccess,
@@ -68,6 +71,7 @@ pub enum SecurityEventType {
     DeviceChange,
     LocationChange,
     BlacklistedTokenUsage,
+    TokenRotated,
 }
 
 /// Session metrics for analytics
@@ -135,6 +139,7 @@ impl SessionManager {
             security: Arc::new(SecurityManager::new()),
             analytics: Arc::new(SessionAnalytics::new()),
             redis_manager: None,
+            audit_manager: Arc::new(AuditManager::new()),
         })
     }
 
@@ -149,6 +154,7 @@ impl SessionManager {
             security: Arc::new(SecurityManager::new()),
             analytics: Arc::new(SessionAnalytics::new()),
             redis_manager: Some(redis_manager),
+            audit_manager: Arc::new(AuditManager::new()),
         })
     }
 
@@ -202,7 +208,7 @@ impl SessionManager {
         );
 
         // Set metadata
-        session.metadata.login_method = login_method;
+        session.metadata.login_method = login_method.clone();
         session.metadata.risk_score = risk.risk_score;
         session.metadata.concurrent_sessions = concurrent_count + 1;
         
@@ -238,6 +244,23 @@ impl SessionManager {
 
         // Update analytics
         self.analytics.update_session_metrics(&session).await;
+
+        // Log audit event for session creation
+        let audit_event = crate::auth::audit::AuditEvent::new(
+            AuditEventType::SessionCreated,
+            ip_address,
+            Some(user_agent.clone()),
+            "Session created successfully".to_string(),
+        )
+        .with_user(user_id.clone())
+        .with_session(session.id.clone())
+        .with_outcome(EventOutcome::Success)
+        .with_severity(EventSeverity::Medium)
+        .with_risk_score(risk.risk_score)
+        .with_metadata("login_method".to_string(), login_method.clone())
+        .with_metadata("security_level".to_string(), format!("{:?}", security_level_clone));
+        
+        self.audit_manager.log_event(&audit_event).await;
 
         // Log session creation event using RedisManager if available
          if let Some(redis_manager) = &self.redis_manager {
@@ -463,6 +486,21 @@ impl SessionManager {
         // Record activity
         self.record_session_activity(&session, ActivityType::SessionRevoked, session.last_ip).await?;
 
+        // Log audit event for session revocation
+        let audit_event = crate::auth::audit::AuditEvent::new(
+            AuditEventType::SessionRevoked,
+            session.last_ip,
+            Some(session.user_agent.clone()),
+            "Session revoked".to_string(),
+        )
+        .with_user(session.user_id.clone())
+        .with_session(session.id.clone())
+        .with_outcome(EventOutcome::Success)
+        .with_severity(EventSeverity::Medium)
+        .with_metadata("reason".to_string(), reason.unwrap_or("Manual revocation").to_string());
+        
+        self.audit_manager.log_event(&audit_event).await?;
+
         Ok(())
     }
 
@@ -566,6 +604,42 @@ impl SessionManager {
         all_activities.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
         Ok(all_activities.into_iter().skip(offset).take(limit).collect())
+    }
+
+    /// Get recent security events for a user
+    pub async fn get_recent_security_events(&self, _user_id: &str, limit_seconds: u64) -> Result<Vec<SecurityEvent>, AppError> {
+        if let Some(redis_manager) = &self.redis_manager {
+            // Calculate limit based on time window - use a reasonable default
+            let limit = std::cmp::min((limit_seconds / 60) as usize, 100); // Rough estimate: 1 event per minute max
+            let events_json = redis_manager.get_recent_security_events(limit).await?;
+            
+            let mut events = Vec::new();
+            for event_json in events_json {
+                if let Ok(event) = serde_json::from_str::<SecurityEvent>(&event_json) {
+                    // Filter events within the time window
+                    let now = Utc::now();
+                    let time_diff = now.signed_duration_since(event.timestamp);
+                    if time_diff.num_seconds() <= limit_seconds as i64 {
+                        events.push(event);
+                    }
+                }
+            }
+            
+            Ok(events)
+        } else {
+            // Fallback to in-memory analytics if no RedisManager
+            let analytics = self.analytics.security_events.read().await;
+            let now = Utc::now();
+            let events: Vec<SecurityEvent> = analytics
+                .iter()
+                .filter(|event| {
+                    let time_diff = now.signed_duration_since(event.timestamp);
+                    time_diff.num_seconds() <= limit_seconds as i64
+                })
+                .cloned()
+                .collect();
+            Ok(events)
+        }
     }
 
     /// Cleanup expired sessions

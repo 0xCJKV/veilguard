@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Request, State},
+    extract::{Request, State, Extension},
     http::{HeaderMap, Method, StatusCode},
     middleware::Next,
     response::Response,
@@ -12,12 +12,19 @@ use sha2::Sha256;
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
+    net::IpAddr,
 };
 use tracing::{debug, warn, error, info};
 use crate::{
     config::Config,
     database::RedisManager,
     errors::AppError,
+    auth::{
+        behavioral::{BehaviorAnalytics, GeoLocation, ThreatAction},
+        threat::{ThreatDetectionEngine, ThreatEvaluationResult},
+        audit::{AuditEvent, AuditEventType, EventOutcome, EventSeverity},
+        ses::{SessionManager, SecurityEventType},
+    },
 };
 
 type HmacSha256 = Hmac<Sha256>;
@@ -48,6 +55,12 @@ pub struct CsrfConfig {
     pub max_tokens_per_session: u32,
     /// Token regeneration interval in seconds
     pub token_regeneration_interval: u64,
+    /// Risk-based validation settings
+    pub enable_risk_based_validation: bool,
+    /// Risk threshold for additional validation
+    pub risk_threshold: f64,
+    /// Enable behavioral analytics
+    pub enable_behavioral_analytics: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +98,9 @@ impl Default for CsrfConfig {
             ],
             max_tokens_per_session: 10,
             token_regeneration_interval: 300, // 5 minutes
+            enable_risk_based_validation: true,
+            risk_threshold: 0.7,
+            enable_behavioral_analytics: true,
         }
     }
 }
@@ -98,47 +114,56 @@ pub struct CsrfToken {
     pub value: String,
     /// Token creation timestamp
     pub created_at: u64,
-    /// Token last used timestamp
+    /// Last usage timestamp
     pub last_used: u64,
-    /// Session identifier for binding
+    /// Session ID binding
     pub session_id: String,
-    /// User identifier for additional binding
+    /// User ID binding (optional)
     pub user_id: Option<String>,
-    /// IP address for additional validation
+    /// IP address binding (optional)
     pub ip_address: Option<String>,
-    /// User agent hash for fingerprinting
+    /// User agent hash for binding
     pub user_agent_hash: Option<String>,
-    /// Number of times token has been used
+    /// Token usage count
     pub use_count: u32,
-    /// HMAC signature of the token
+    /// HMAC signature for integrity
     pub signature: String,
+    /// Risk score at token creation
+    pub risk_score: Option<f64>,
+    /// Behavioral context at creation
+    pub behavioral_context: Option<String>,
 }
 
 impl CsrfToken {
-    /// Create a new CSRF token with cryptographic security
-    pub fn new(
+    /// Create a new CSRF token with risk assessment
+    pub fn new_with_risk(
         session_id: String,
         user_id: Option<String>,
         ip_address: Option<String>,
         user_agent: Option<String>,
         secret_key: &str,
+        risk_score: Option<f64>,
+        behavioral_context: Option<String>,
     ) -> Result<Self, AppError> {
         let token_id = generate_secure_id();
         let value = generate_secure_token();
-        let now = current_timestamp();
-        let user_agent_hash = user_agent.map(|ua| sha256_hash(&ua));
+        let current_time = current_timestamp();
+        
+        let user_agent_hash = user_agent.as_ref().map(|ua| sha256_hash(ua));
 
         let mut token = Self {
             token_id,
             value,
-            created_at: now,
-            last_used: now,
+            created_at: current_time,
+            last_used: current_time,
             session_id,
             user_id,
             ip_address,
             user_agent_hash,
             use_count: 0,
-            signature: String::new(), // Will be set below
+            signature: String::new(),
+            risk_score,
+            behavioral_context,
         };
 
         // Generate HMAC signature
@@ -246,14 +271,31 @@ impl CsrfToken {
 pub struct CsrfProtection {
     redis: Arc<RedisManager>,
     config: CsrfConfig,
+    threat_engine: Option<Arc<ThreatDetectionEngine>>,
+    session_manager: Option<Arc<SessionManager>>,
 }
 
 impl CsrfProtection {
     pub fn new(redis: Arc<RedisManager>, config: CsrfConfig) -> Self {
-        Self { redis, config }
+        Self {
+            redis,
+            config,
+            threat_engine: None,
+            session_manager: None,
+        }
     }
 
-    /// Generate a new CSRF token with session binding
+    pub fn with_threat_engine(mut self, threat_engine: Arc<ThreatDetectionEngine>) -> Self {
+        self.threat_engine = Some(threat_engine);
+        self
+    }
+
+    pub fn with_session_manager(mut self, session_manager: Arc<SessionManager>) -> Self {
+        self.session_manager = Some(session_manager);
+        self
+    }
+
+    /// Generate a new CSRF token with behavioral analytics and risk assessment
     pub async fn generate_token(
         &self,
         session_id: String,
@@ -261,39 +303,65 @@ impl CsrfProtection {
         ip_address: Option<String>,
         user_agent: Option<String>,
     ) -> Result<CsrfToken, AppError> {
-        // Clean up old tokens for this session first
+        // Perform behavioral analysis if enabled
+        let (risk_score, behavioral_context) = if self.config.enable_behavioral_analytics {
+            self.analyze_token_generation_behavior(&session_id, &user_id, &ip_address, &user_agent).await?
+        } else {
+            (None, None)
+        };
+
+        // Check if we need to limit token generation based on risk
+        if let Some(score) = risk_score {
+            if score > self.config.risk_threshold {
+                warn!("High risk CSRF token generation attempt blocked: score={}", score);
+                
+                // Log security event
+                let _ = self.redis.add_security_event(
+                    user_id.as_deref().unwrap_or("unknown"),
+                    SecurityEventType::SecurityViolation,
+                    "High-risk CSRF token generation blocked",
+                    ip_address.as_deref().and_then(|ip| ip.parse::<IpAddr>().ok()).unwrap_or("127.0.0.1".parse().unwrap()),
+                    &user_agent.unwrap_or_default()
+                ).await;
+                
+                return Err(AppError::SecurityViolation("Token generation blocked due to high risk".to_string()));
+            }
+        }
+
+        // Clean up old tokens for this session
         self.cleanup_session_tokens(&session_id).await?;
 
-        // Create new token
-        let token = CsrfToken::new(
+        let token = CsrfToken::new_with_risk(
             session_id.clone(),
             user_id,
             ip_address,
             user_agent,
             &self.config.secret_key,
+            risk_score,
+            behavioral_context,
         )?;
 
-        // Store token in Redis with multiple keys for efficient lookup
+        // Store token in Redis with session tracking
         let token_key = format!("csrf_token:{}", token.token_id);
         let session_key = format!("csrf_session:{}:{}", session_id, token.token_id);
         
-        let serialized = token.serialize()?;
+        let serialized_token = token.serialize()?;
         
-        // Store with expiration
+        // Store token with expiration
         self.redis
-            .set_with_expiry(&token_key, &serialized, self.config.token_lifetime)
+            .set_with_expiry(&token_key, &serialized_token, self.config.token_lifetime)
             .await?;
-            
-        // Store session mapping
+        
+        // Track token in session
         self.redis
             .set_with_expiry(&session_key, &token.token_id, self.config.token_lifetime)
             .await?;
 
-        info!("Generated CSRF token: {} for session: {}", token.token_id, session_id);
+        debug!("Generated CSRF token: {} for session: {}", token.token_id, session_id);
         Ok(token)
     }
 
-    /// Validate CSRF token with comprehensive security checks
+    /// Validate CSRF token with enhanced behavioral and risk-based checks
     pub async fn validate_token(
         &self,
         token_value: &str,
@@ -363,6 +431,22 @@ impl CsrfProtection {
             return Ok(false);
         }
 
+        // Perform risk-based validation if enabled
+        if self.config.enable_risk_based_validation {
+            let validation_result = self.perform_risk_based_validation(
+                &token,
+                session_id,
+                user_id,
+                ip_address,
+                user_agent,
+            ).await?;
+
+            if !validation_result {
+                warn!("CSRF token failed risk-based validation: {}", token_id);
+                return Ok(false);
+            }
+        }
+
         // Update token usage
         token.mark_used();
         let updated_data = token.serialize()?;
@@ -371,6 +455,140 @@ impl CsrfProtection {
             .await?;
 
         debug!("CSRF token validation successful: {}", token_id);
+        Ok(true)
+    }
+
+    /// Perform behavioral analysis for token generation
+    async fn analyze_token_generation_behavior(
+        &self,
+        session_id: &str,
+        user_id: &Option<String>,
+        ip_address: &Option<String>,
+        user_agent: &Option<String>,
+    ) -> Result<(Option<f64>, Option<String>), AppError> {
+        if let Some(ref threat_engine) = self.threat_engine {
+            // Get session for analysis
+            if let Some(ref session_manager) = self.session_manager {
+                if let Ok(Some(session)) = session_manager.get_session(session_id).await {
+                    // Create behavioral analytics context
+                    let user_behavior = BehaviorAnalytics::new(); // TODO: Load from database
+                    let geo_data = GeoLocation {
+                        current_location: (0.0, 0.0), // TODO: Get from IP geolocation service
+                        previous_location: None,
+                        country_code: "US".to_string(),
+                        city: None,
+                        timezone: "UTC".to_string(),
+                        isp: None,
+                        is_vpn_proxy: false,
+                    };
+
+                    // Evaluate threats for token generation
+                    match threat_engine.evaluate_session_threats(&session, &user_behavior, &geo_data).await {
+                        Ok(evaluation) => {
+                            let behavioral_context = serde_json::json!({
+                                "timestamp": chrono::Utc::now().timestamp(),
+                                "ip_address": ip_address,
+                                "user_agent": user_agent,
+                                "session_id": session_id,
+                                "user_id": user_id,
+                                "threats": evaluation.threats,
+                                "risk_score": evaluation.risk_score,
+                                "recommended_actions": evaluation.recommended_actions,
+                                "requires_immediate_action": evaluation.requires_immediate_action,
+                            });
+
+                            return Ok((Some(evaluation.risk_score), Some(behavioral_context.to_string())));
+                        }
+                        Err(e) => {
+                            warn!("Failed to evaluate threats for CSRF token generation: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok((None, None))
+    }
+
+    /// Perform risk-based validation during token usage
+    async fn perform_risk_based_validation(
+        &self,
+        token: &CsrfToken,
+        session_id: &str,
+        user_id: Option<&str>,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<bool, AppError> {
+        // Check for suspicious token usage patterns
+        if token.use_count > 100 {
+            warn!("CSRF token used excessively: {} times", token.use_count);
+            return Ok(false);
+        }
+
+        // Check time-based anomalies
+        let current_time = current_timestamp();
+        let time_since_creation = current_time - token.created_at;
+        let time_since_last_use = current_time - token.last_used;
+
+        // Flag rapid successive usage (potential automation)
+        if time_since_last_use < 1 && token.use_count > 5 {
+            warn!("Rapid CSRF token usage detected - potential automation");
+            return Ok(false);
+        }
+
+        // Check if behavioral context has changed significantly
+        if let Some(ref behavioral_context) = token.behavioral_context {
+            if let Ok(stored_context) = serde_json::from_str::<serde_json::Value>(behavioral_context) {
+                let current_context = serde_json::json!({
+                    "ip_address": ip_address,
+                    "user_agent": user_agent,
+                    "session_id": session_id,
+                    "user_id": user_id,
+                });
+
+                // Simple context comparison - in production, use more sophisticated analysis
+                if stored_context.get("ip_address") != current_context.get("ip_address") {
+                    warn!("IP address changed during CSRF token usage");
+                    // Don't fail immediately, but increase suspicion
+                }
+
+                if stored_context.get("user_agent") != current_context.get("user_agent") {
+                    warn!("User agent changed during CSRF token usage");
+                    // Don't fail immediately, but increase suspicion
+                }
+            }
+        }
+
+        // Additional threat evaluation if available
+        if let Some(ref threat_engine) = self.threat_engine {
+            if let Some(ref session_manager) = self.session_manager {
+                if let Ok(Some(session)) = session_manager.get_session(session_id).await {
+                    let user_behavior = BehaviorAnalytics::new(); // TODO: Load from database
+                    let geo_data = GeoLocation {
+                        current_location: (0.0, 0.0), // TODO: Get from IP geolocation service
+                        previous_location: None,
+                        country_code: "US".to_string(),
+                        city: None,
+                        timezone: "UTC".to_string(),
+                        isp: None,
+                        is_vpn_proxy: false,
+                    };
+
+                    match threat_engine.evaluate_session_threats(&session, &user_behavior, &geo_data).await {
+                        Ok(evaluation) => {
+                            if evaluation.risk_score > self.config.risk_threshold {
+                                warn!("High risk detected during CSRF token validation: score={}", evaluation.risk_score);
+                                return Ok(false);
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to evaluate threats during CSRF validation: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(true)
     }
 
@@ -504,6 +722,8 @@ impl CsrfProtection {
 /// CSRF protection middleware
 pub async fn csrf_protection_middleware(
     State(csrf): State<Arc<CsrfProtection>>,
+    Extension(threat_engine): Extension<Arc<ThreatDetectionEngine>>,
+    Extension(session_manager): Extension<Arc<SessionManager>>,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -629,6 +849,9 @@ pub fn create_csrf_protection(redis: Arc<RedisManager>, config: &Config) -> Csrf
         ],
         max_tokens_per_session: 10,
         token_regeneration_interval: 300, // 5 minutes
+        enable_risk_based_validation: true,
+        risk_threshold: 0.7,
+        enable_behavioral_analytics: true,
     };
 
     CsrfProtection::new(redis, csrf_config)

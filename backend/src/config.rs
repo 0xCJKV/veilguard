@@ -1,5 +1,7 @@
 use dotenvy::dotenv;
 use std::env;
+use std::fs;
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -8,6 +10,7 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub log_level: String,
+    pub log_dir: String,
     pub redis_url: String,
     pub rate_limit_requests: u32,
     pub rate_limit_window_seconds: u64,
@@ -17,6 +20,14 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Self {
         dotenv().ok();
+        
+        let log_dir = env::var("LOG_DIR")
+            .unwrap_or_else(|_| "./logs".to_string());
+        
+        // Ensure log directory exists
+        if let Err(e) = fs::create_dir_all(&log_dir) {
+            eprintln!("Warning: Failed to create log directory '{}': {}", log_dir, e);
+        }
         
         Self {
             database_url: env::var("DATABASE_URL")
@@ -31,6 +42,7 @@ impl Config {
                 .expect("PORT must be a valid number"),
             log_level: env::var("LOG_LEVEL")
                 .unwrap_or_else(|_| "info".to_string()),
+            log_dir,
             redis_url: env::var("REDIS_URL")
                 .unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string()),
             rate_limit_requests: env::var("RATE_LIMIT_REQUESTS")
