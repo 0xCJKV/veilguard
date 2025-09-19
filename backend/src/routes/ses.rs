@@ -15,9 +15,8 @@ use crate::auth::ses::SessionManager;
 use crate::errors::AppError;
 use crate::models::ses::{
     Session, CreateSessionRequest, RefreshSessionRequest, RevokeSessionRequest, ValidationResponse,
-    SecurityLevel
 };
-use crate::models::security::{SessionActivity, ActivityType};
+use crate::models::security::{SessionActivity, SecurityLevel};
 use crate::auth::threat::ThreatDetectionEngine;
 use crate::database::RedisManager;
 

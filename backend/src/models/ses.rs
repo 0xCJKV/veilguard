@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use crate::errors::AppError;
+use crate::models::security::{SecurityLevel, SessionActivity, ActivityType, SecurityEvent, SecurityEventType, DeviceFingerprinting};
 
 /// Session data structure with comprehensive security metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,20 +40,7 @@ pub struct Session {
     pub flags: SessionFlags,
 }
 
-/// Security levels for sessions
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Hash)]
-pub enum SecurityLevel {
-    /// Low security - basic authentication
-    Low,
-    /// Standard security - normal user operations
-    Standard,
-    /// High security - sensitive operations
-    High,
-    /// Critical security - highest level operations
-    Critical,
-    /// Administrative - admin operations
-    Administrative,
-}
+
 
 /// Session metadata containing additional security information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,29 +156,7 @@ pub enum SecurityWarning {
     TimeZoneChange,
 }
 
-/// Session activity tracking
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionActivity {
-    pub session_id: String,
-    pub activity_type: ActivityType,
-    pub timestamp: DateTime<Utc>,
-    pub ip_address: IpAddr,
-    pub user_agent: String,
-    pub details: HashMap<String, String>,
-}
 
-/// Types of session activities
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ActivityType {
-    SessionCreated,
-    SessionRefreshed,
-    SessionRevoked,
-    SecurityValidation,
-    SuspiciousActivity,
-    PrivilegeEscalation,
-    LocationChange,
-    DeviceChange,
-}
 
 /// Session configuration
 #[derive(Debug, Clone)]
@@ -350,12 +316,6 @@ impl Session {
 
         // Cap at 1.0
         risk_score.min(1.0)
-    }
-}
-
-impl Default for SecurityLevel {
-    fn default() -> Self {
-        SecurityLevel::Standard
     }
 }
 

@@ -22,7 +22,7 @@ use crate::{
     },
     config::Config,
     database::{users, DbPool, redis::RedisManager},
-    models::{CreateUserRequest, LoginRequest, UserResponse, ses::SecurityLevel, security::SecurityAction},
+    models::{CreateUserRequest, LoginRequest, UserResponse, security::SecurityLevel},
     errors::{AppError, Result},
 };
 

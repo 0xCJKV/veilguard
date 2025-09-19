@@ -12,7 +12,7 @@ use chrono::{Duration, Utc};
 use crate::{
     auth::{
         Claims, PasetoManager, 
-        ses::{SessionManager, SecurityEventType},
+        ses::{SessionManager},
         threat::{ThreatDetectionEngine, ThreatEvaluationResult},
         behavioral::{BehaviorAnalytics, GeoLocation},
         binding::SessionBindingManager,
@@ -20,6 +20,7 @@ use crate::{
     config::Config,
     database::redis::RedisManager,
     errors::AppError,
+    models::SecurityEventType,
 };
 
 /// Authentication state that gets injected into protected route handlers

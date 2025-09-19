@@ -2,11 +2,11 @@ pub mod ses;
 pub mod user;
 pub mod security;
 
-pub use ses::{Session, SecurityLevel, SessionMetadata, SessionFlags, CreateSessionRequest, SessionValidationResult, ValidationError, SecurityWarning, SessionActivity, ActivityType, SessionConfig};
+pub use ses::{Session, SessionMetadata, SessionFlags, CreateSessionRequest, SessionValidationResult, ValidationError, SecurityWarning, SessionConfig};
 pub use user::{User, CreateUserRequest, UpdateUserRequest, LoginRequest, UserResponse};
 pub use security::{
-    SessionMetrics, SecurityConfig, RiskThresholds, BindingConfig, ThreatConfig, AuditConfig, BehavioralConfig,
-    RiskAssessment, RiskFactor, RiskFactorType, SecurityAction, EventSeverity,
-    ThreatData, IpThreatInfo, UserThreatInfo, ThreatIntelligence, BehavioralProfile,
-    ThreatStatistics, DailyStats
+    SecurityConfig, RiskAssessment, RiskFactor, RiskFactorType, SecurityAction, EventSeverity,
+    SessionMetrics, RiskThresholds, BindingConfig, ThreatConfig, AuditConfig, BehavioralConfig,
+    ThreatData, IpThreatInfo, UserThreatInfo, ThreatIntelligence, BehavioralProfile, ThreatStatistics, DailyStats,
+    SecurityLevel, SessionActivity, ActivityType, SecurityEvent, SecurityEventType, DeviceFingerprinting
 };

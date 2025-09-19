@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use crate::errors::AppError;
 
 /// Unified session metrics for analytics across all auth modules
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -164,6 +163,68 @@ pub enum EventSeverity {
     Medium,
     High,
     Critical,
+}
+
+/// Security levels for sessions
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Hash)]
+pub enum SecurityLevel {
+    /// Low security - basic authentication
+    Low,
+    /// Standard security - normal user operations
+    Standard,
+    /// High security - sensitive operations
+    High,
+    /// Critical security - highest level operations
+    Critical,
+    /// Administrative - admin operations
+    Administrative,
+}
+
+impl Default for SecurityLevel {
+    fn default() -> Self {
+        SecurityLevel::Standard
+    }
+}
+
+/// Security event tracking for sessions
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityEvent {
+    pub event_type: SecurityEventType,
+    pub user_id: String,
+    pub session_id: Option<String>,
+    pub ip_address: IpAddr,
+    pub timestamp: DateTime<Utc>,
+    pub details: HashMap<String, String>,
+}
+
+/// Types of security events
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SecurityEventType {
+    LoginAttempt,
+    LoginSuccess,
+    LoginFailure,
+    AuthenticationFailed,
+    SessionCreated,
+    SessionRevoked,
+    SessionValidated,
+    SuspiciousActivity,
+    SecurityViolation,
+    DeviceChange,
+    LocationChange,
+    BlacklistedTokenUsage,
+    TokenRotated,
+}
+
+/// Device fingerprinting for security validation
+#[derive(Debug, Clone)]
+pub struct DeviceFingerprinting {
+    pub user_agent: String,
+    pub screen_resolution: Option<String>,
+    pub timezone: Option<String>,
+    pub language: Option<String>,
+    pub platform: Option<String>,
+    pub plugins: Vec<String>,
+    pub canvas_fingerprint: Option<String>,
 }
 
 /// Unified risk assessment structure

@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use crate::errors::AppError;
-use crate::models::ses::{Session, SecurityLevel};
+use crate::models::ses::{Session};
 use crate::models::security::{
     RiskAssessment, RiskFactor, RiskFactorType, SecurityAction, EventSeverity,
-    BehavioralProfile, SessionMetrics, ActivityType
+    BehavioralProfile, SessionMetrics, ActivityType, SecurityLevel
 };
 use super::utils::{calculate_distance, calculate_travel_velocity};
 

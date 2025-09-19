@@ -1,34 +1,31 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
-use chrono::{DateTime, Utc, Duration};
-use redis::{AsyncCommands, RedisResult};
-use serde::{Serialize, Deserialize};
+use chrono::{Utc, Duration};
+use redis::{AsyncCommands};
 use serde_json;
 use tokio::sync::RwLock;
-use uuid::Uuid;
 
 use crate::errors::AppError;
 use crate::database::redis::RedisManager;
 use crate::auth::audit::{AuditManager, AuditEventType, EventOutcome, EventSeverity};
 use crate::models::ses::{
     Session, SessionConfig, SessionValidationResult, ValidationError, SecurityWarning,
-    SecurityLevel, CreateSessionRequest, SessionFlags, SessionMetadata,
+    SessionFlags, SessionMetadata,
 };
 use crate::models::security::{
-    SessionMetrics, SecurityAction, RiskAssessment, EventSeverity as SecurityEventSeverity,
-    SessionActivity, ActivityType,
+    SessionMetrics, SecurityAction, RiskAssessment, EventSeverity as SecurityEventSeverity, SecurityLevel,
+    SessionActivity, ActivityType, RiskFactorType, RiskFactor, SecurityEvent, SecurityEventType, DeviceFingerprinting,
 };
 use super::utils::{is_expired, generate_secure_token, default_hash};
 
 /// Session manager with Redis backend and security features
 #[derive(Clone)]
 pub struct SessionManager {
-    redis: redis::Client,
+    redis_manager: Arc<RedisManager>,
     config: SessionConfig,
     security: Arc<SecurityManager>,
     analytics: Arc<SessionAnalytics>,
-    redis_manager: Option<Arc<RedisManager>>,
     audit_manager: Arc<AuditManager>,
 }
 
@@ -49,107 +46,16 @@ pub struct SessionAnalytics {
     session_metrics: RwLock<SessionMetrics>,
 }
 
-/// Security event tracking
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecurityEvent {
-    pub event_type: SecurityEventType,
-    pub user_id: String,
-    pub session_id: Option<String>,
-    pub ip_address: IpAddr,
-    pub timestamp: DateTime<Utc>,
-    pub details: HashMap<String, String>,
-}
-
-/// Types of security events
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SecurityEventType {
-    LoginAttempt,
-    LoginSuccess,
-    LoginFailure,
-    AuthenticationFailed,
-    SessionCreated,
-    SessionRevoked,
-    SessionValidated,
-    SuspiciousActivity,
-    SecurityViolation,
-    DeviceChange,
-    LocationChange,
-    BlacklistedTokenUsage,
-    TokenRotated,
-}
-
-// Remove duplicate SessionMetrics - now using from models/security.rs
-
-/// Device fingerprinting for security validation
-#[derive(Debug, Clone)]
-pub struct DeviceFingerprinting {
-    pub user_agent: String,
-    pub screen_resolution: Option<String>,
-    pub timezone: Option<String>,
-    pub language: Option<String>,
-    pub platform: Option<String>,
-    pub plugins: Vec<String>,
-    pub canvas_fingerprint: Option<String>,
-}
-
-/// Risk assessment result (simplified - using RiskAssessment from models/security.rs for core logic)
-#[derive(Debug)]
-pub struct SecurityRisk {
-    pub risk_score: f64,
-    pub risk_factors: Vec<RiskFactor>,
-    pub recommended_action: RecommendedAction,
-}
-
-/// Risk factors for security assessment
-#[derive(Debug, Clone)]
-pub enum RiskFactor {
-    UnknownIpAddress,
-    UnknownDevice,
-    UnusualLoginTime,
-    MultipleFailedAttempts,
-    ConcurrentSessions,
-    LocationChange,
-    SuspiciousUserAgent,
-    HighVelocityRequests,
-}
-
-/// Recommended security actions
-#[derive(Debug)]
-pub enum RecommendedAction {
-    Allow,
-    RequireMfa,
-    Block,
-    Monitor,
-    RequireReauth,
-}
+// Risk factors and recommended actions now use types from models/security.rs
 
 impl SessionManager {
-    /// Create a new session manager
-    pub fn new(redis_url: &str, config: SessionConfig) -> Result<Self, AppError> {
-        let redis = redis::Client::open(redis_url)
-            .map_err(|e| AppError::internal(&format!("Redis connection failed: {}", e)))?;
-
+    /// Create a new session manager with RedisManager integration
+    pub fn new(config: SessionConfig, redis_manager: Arc<RedisManager>) -> Result<Self, AppError> {
         Ok(Self {
-            redis,
+            redis_manager,
             config,
             security: Arc::new(SecurityManager::new()),
             analytics: Arc::new(SessionAnalytics::new()),
-            redis_manager: None,
-            audit_manager: Arc::new(AuditManager::new()),
-        })
-    }
-
-    /// Create a new SessionManager with RedisManager integration
-    pub fn new_with_redis_manager(redis_url: &str, config: SessionConfig, redis_manager: Arc<RedisManager>) -> Result<Self, AppError> {
-        let redis = redis::Client::open(redis_url)
-            .map_err(|e| AppError::internal(&format!("Redis connection failed: {}", e)))?;
-
-        Ok(Self {
-            redis,
-            config,
-            security: Arc::new(SecurityManager::new()),
-            analytics: Arc::new(SessionAnalytics::new()),
-            redis_manager: Some(redis_manager),
             audit_manager: Arc::new(AuditManager::new()),
         })
     }
@@ -174,11 +80,11 @@ impl SessionManager {
         ).await;
 
         // Check if we should block this session creation
-        match risk.recommended_action {
-            RecommendedAction::Block => {
+        match risk.recommended_actions.first() {
+            Some(SecurityAction::AccountLocked) => {
                 return Err(AppError::Forbidden);
             }
-            RecommendedAction::RequireMfa => {
+            Some(SecurityAction::MfaRequired) => {
                 // In a real implementation, this would trigger MFA flow
                 // For now, we'll create the session but mark it as requiring MFA
             }
@@ -213,7 +119,7 @@ impl SessionManager {
         }
 
         // Set flags based on risk assessment
-        if matches!(risk.recommended_action, RecommendedAction::RequireMfa) {
+        if matches!(risk.recommended_actions.first(), Some(SecurityAction::MfaRequired)) {
             session.flags.requires_mfa = true;
         }
 
@@ -258,24 +164,22 @@ impl SessionManager {
         
         self.audit_manager.log_event(&audit_event).await;
 
-        // Log session creation event using RedisManager if available
-         if let Some(redis_manager) = &self.redis_manager {
-             let _ = redis_manager.add_security_event(
-                  &user_id,
-                  SecurityEventType::SessionCreated,
-                  &format!("Session created with security level: {:?}", security_level_clone),
-                  ip_address,
-                  &user_agent
-              ).await;
+        // Log session creation event using RedisManager
+        let _ = self.redis_manager.add_security_event(
+            &user_id,
+            SecurityEventType::SessionCreated,
+            &format!("Session created with security level: {:?}", security_level_clone),
+            ip_address,
+            &user_agent
+        ).await;
 
-            // Store session analytics
-            if let Ok(analytics_data) = serde_json::to_string(&session.metadata) {
-                let _ = redis_manager.store_session_analytics(
-                    &session.id,
-                    &analytics_data,
-                    self.config.default_lifetime
-                ).await;
-            }
+        // Store session analytics
+        if let Ok(analytics_data) = serde_json::to_string(&session.metadata) {
+            let _ = self.redis_manager.store_session_analytics(
+                &session.id,
+                &analytics_data,
+                self.config.default_lifetime
+            ).await;
         }
 
         Ok(session)
@@ -283,45 +187,23 @@ impl SessionManager {
 
     /// Get session by ID
     pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>, AppError> {
-        // Use RedisManager if available for enhanced session retrieval
-        if let Some(redis_manager) = &self.redis_manager {
-            if let Some(session_data) = redis_manager.get_session(session_id).await? {
-                let session: Session = serde_json::from_str(&session_data)
-                    .map_err(|e| AppError::internal(&format!("Session deserialization failed: {}", e)))?;
-                return Ok(Some(session));
-            } else {
-                return Ok(None);
-            }
-        }
-
-        // Fallback to direct Redis connection
-        let mut conn = self.get_redis_connection().await?;
-        let key = format!("session:{}", session_id);
-        
-        let session_data: Option<String> = conn.get(&key).await
-            .map_err(|e| AppError::internal(&format!("Redis get failed: {}", e)))?;
-
-        match session_data {
-            Some(data) => {
-                let session: Session = serde_json::from_str(&data)
-                    .map_err(|e| AppError::internal(&format!("Session deserialization failed: {}", e)))?;
-                Ok(Some(session))
-            }
-            None => Ok(None),
+        if let Some(session_data) = self.redis_manager.get_session(session_id).await? {
+            let session: Session = serde_json::from_str(&session_data)
+                .map_err(|e| AppError::internal(&format!("Session deserialization failed: {}", e)))?;
+            Ok(Some(session))
+        } else {
+            Ok(None)
         }
     }
 
     /// Get session by token
     pub async fn get_session_by_token(&self, token: &str) -> Result<Option<Session>, AppError> {
-        let mut conn = self.get_redis_connection().await?;
         let token_key = format!("token:{}", token);
         
-        let session_id: Option<String> = conn.get(&token_key).await
-            .map_err(|e| AppError::internal(&format!("Redis get failed: {}", e)))?;
-
-        match session_id {
-            Some(id) => self.get_session(&id).await,
-            None => Ok(None),
+        if let Some(session_id) = self.redis_manager.get(&token_key).await? {
+            self.get_session(&session_id).await
+        } else {
+            Ok(None)
         }
     }
 
@@ -389,16 +271,14 @@ impl SessionManager {
         if risk.risk_score > 0.8 {
             security_warnings.push(SecurityWarning::HighRiskScore);
 
-            // Log security event using RedisManager if available
-              if let Some(redis_manager) = &self.redis_manager {
-                  let _ = redis_manager.add_security_event(
-                      &session.user_id,
-                      SecurityEventType::SuspiciousActivity,
-                      &format!("High risk activity detected with score: {:.2}", risk.risk_score),
-                      ip_address,
-                      user_agent
-                  ).await;
-              }
+            // Log security event using RedisManager
+            let _ = self.redis_manager.add_security_event(
+                &session.user_id,
+                SecurityEventType::SuspiciousActivity,
+                &format!("High risk activity detected with score: {:.2}", risk.risk_score),
+                ip_address,
+                user_agent
+            ).await;
         }
 
         // Update session activity if valid
@@ -410,15 +290,13 @@ impl SessionManager {
             self.store_session(&updated_session).await?;
 
             // Record session validation event
-             if let Some(redis_manager) = &self.redis_manager {
-                 let _ = redis_manager.add_security_event(
-                     &session.user_id,
-                     SecurityEventType::LoginSuccess,
-                     "Session validation successful",
-                     ip_address,
-                     user_agent
-                 ).await;
-             }
+            let _ = self.redis_manager.add_security_event(
+                &session.user_id,
+                SecurityEventType::LoginSuccess,
+                "Session validation successful",
+                ip_address,
+                user_agent
+            ).await;
         }
 
         Ok(SessionValidationResult {
@@ -474,10 +352,8 @@ impl SessionManager {
         self.store_session(&session).await?;
 
         // Remove from token index
-        let mut conn = self.get_redis_connection().await?;
         let token_key = format!("token:{}", session.token);
-        let _: () = conn.del(&token_key).await
-            .map_err(|e| AppError::internal(&format!("Redis delete failed: {}", e)))?;
+        self.redis_manager.del(&token_key).await?;
 
         // Record activity
         self.record_session_activity(&session, ActivityType::SessionRevoked, session.last_ip).await?;
@@ -495,7 +371,7 @@ impl SessionManager {
         .with_severity(EventSeverity::Medium)
         .with_metadata("reason".to_string(), reason.unwrap_or("Manual revocation").to_string());
         
-        self.audit_manager.log_event(&audit_event).await?;
+        self.audit_manager.log_event(&audit_event).await;
 
         Ok(())
     }
@@ -519,7 +395,6 @@ impl SessionManager {
         limit: usize,
         offset: usize,
     ) -> Result<Vec<Session>, AppError> {
-        let mut conn = self.get_redis_connection().await?;
         
         // Get all session keys
         let pattern = match user_id {
@@ -527,13 +402,12 @@ impl SessionManager {
             None => "session:*".to_string(),
         };
 
-        let keys: Vec<String> = conn.keys(&pattern).await
-            .map_err(|e| AppError::internal(&format!("Redis keys failed: {}", e)))?;
+        let keys: Vec<String> = self.redis_manager.keys(&pattern).await?;
 
         let mut sessions = Vec::new();
         
         for key in keys.into_iter().skip(offset).take(limit) {
-            if let Ok(Some(data)) = conn.get::<_, Option<String>>(&key).await {
+            if let Ok(Some(data)) = self.redis_manager.get(&key).await {
                 if let Ok(session) = serde_json::from_str::<Session>(&data) {
                     if !active_only || session.is_valid() {
                         sessions.push(session);
@@ -561,11 +435,9 @@ impl SessionManager {
 
     /// Get session activity
     pub async fn get_session_activity(&self, session_id: &str) -> Result<Vec<SessionActivity>, AppError> {
-        let mut conn = self.get_redis_connection().await?;
         let key = format!("activity:{}", session_id);
         
-        let activities: Vec<String> = conn.lrange(&key, 0, -1).await
-            .map_err(|e| AppError::internal(&format!("Redis lrange failed: {}", e)))?;
+        let activities: Vec<String> = self.redis_manager.lrange(&key, 0, -1).await?;
 
         let mut result = Vec::new();
         for activity_data in activities {
@@ -579,15 +451,12 @@ impl SessionManager {
 
     /// Get all activity (admin)
     pub async fn get_all_activity(&self, limit: usize, offset: usize) -> Result<Vec<SessionActivity>, AppError> {
-        let mut conn = self.get_redis_connection().await?;
-        let keys: Vec<String> = conn.keys("activity:*").await
-            .map_err(|e| AppError::internal(&format!("Redis keys failed: {}", e)))?;
+        let keys: Vec<String> = self.redis_manager.keys("activity:*").await?;
 
         let mut all_activities = Vec::new();
         
         for key in keys {
-            let activities: Vec<String> = conn.lrange(&key, 0, -1).await
-                .map_err(|e| AppError::internal(&format!("Redis lrange failed: {}", e)))?;
+            let activities: Vec<String> = self.redis_manager.lrange(&key, 0, -1).await?;
 
             for activity_data in activities {
                 if let Ok(activity) = serde_json::from_str::<SessionActivity>(&activity_data) {
@@ -604,60 +473,41 @@ impl SessionManager {
 
     /// Get recent security events for a user
     pub async fn get_recent_security_events(&self, _user_id: &str, limit_seconds: u64) -> Result<Vec<SecurityEvent>, AppError> {
-        if let Some(redis_manager) = &self.redis_manager {
-            // Calculate limit based on time window - use a reasonable default
-            let limit = std::cmp::min((limit_seconds / 60) as usize, 100); // Rough estimate: 1 event per minute max
-            let events_json = redis_manager.get_recent_security_events(limit).await?;
-            
-            let mut events = Vec::new();
-            for event_json in events_json {
-                if let Ok(event) = serde_json::from_str::<SecurityEvent>(&event_json) {
-                    // Filter events within the time window
-                    let now = Utc::now();
-                    let time_diff = now.signed_duration_since(event.timestamp);
-                    if time_diff.num_seconds() <= limit_seconds as i64 {
-                        events.push(event);
-                    }
+        // Calculate limit based on time window - use a reasonable default
+        let limit = std::cmp::min((limit_seconds / 60) as usize, 100); // Rough estimate: 1 event per minute max
+        let events_json = self.redis_manager.get_recent_security_events(limit).await?;
+        
+        let mut events = Vec::new();
+        for event_json in events_json {
+            if let Ok(event) = serde_json::from_str::<SecurityEvent>(&event_json) {
+                // Filter events within the time window
+                let now = Utc::now();
+                let time_diff = now.signed_duration_since(event.timestamp);
+                if time_diff.num_seconds() <= limit_seconds as i64 {
+                    events.push(event);
                 }
             }
-            
-            Ok(events)
-        } else {
-            // Fallback to in-memory analytics if no RedisManager
-            let analytics = self.analytics.security_events.read().await;
-            let now = Utc::now();
-            let events: Vec<SecurityEvent> = analytics
-                .iter()
-                .filter(|event| {
-                    let time_diff = now.signed_duration_since(event.timestamp);
-                    time_diff.num_seconds() <= limit_seconds as i64
-                })
-                .cloned()
-                .collect();
-            Ok(events)
         }
+            
+        Ok(events)
     }
 
     /// Cleanup expired sessions
     pub async fn cleanup_expired_sessions(&self) -> Result<usize, AppError> {
-        let mut conn = self.get_redis_connection().await?;
-        let keys: Vec<String> = conn.keys("session:*").await
-            .map_err(|e| AppError::internal(&format!("Redis keys failed: {}", e)))?;
+        let keys: Vec<String> = self.redis_manager.keys("session:*").await?;
 
         let mut cleaned_count = 0;
 
         for key in keys {
-            if let Ok(Some(data)) = conn.get::<_, Option<String>>(&key).await {
+            if let Ok(Some(data)) = self.redis_manager.get(&key).await {
                 if let Ok(session) = serde_json::from_str::<Session>(&data) {
                     if session.is_expired() {
                         // Delete session
-                        let _: () = conn.del(&key).await
-                            .map_err(|e| AppError::internal(&format!("Redis delete failed: {}", e)))?;
+                        self.redis_manager.del(&key).await?;
                         
                         // Delete token index
                         let token_key = format!("token:{}", session.token);
-                        let _: () = conn.del(&token_key).await
-                            .map_err(|e| AppError::internal(&format!("Redis delete failed: {}", e)))?;
+                        self.redis_manager.del(&token_key).await?;
                         
                         cleaned_count += 1;
                     }
@@ -671,50 +521,20 @@ impl SessionManager {
     // Private helper methods
 
     async fn store_session(&self, session: &Session) -> Result<(), AppError> {
-        // Use RedisManager if available for enhanced session storage
-        if let Some(redis_manager) = &self.redis_manager {
-            let session_data = serde_json::to_string(session)
-                .map_err(|e| AppError::internal(&format!("Session serialization failed: {}", e)))?;
-            
-            // Store session with RedisManager
-            redis_manager.set_session(&session.id, &session_data, self.config.default_lifetime).await?;
-            
-            // Update user session count
-            let _ = redis_manager.increment_user_session_count(&session.user_id, self.config.default_lifetime).await;
-            
-            return Ok(());
-        }
-
-        // Fallback to direct Redis connection
-        let mut conn = self.get_redis_connection().await?;
-        
         let session_data = serde_json::to_string(session)
             .map_err(|e| AppError::internal(&format!("Session serialization failed: {}", e)))?;
-
-        let session_key = format!("session:{}", session.id);
-        let token_key = format!("token:{}", session.token);
         
-        // Store session data
-        let _: () = conn.set_ex(&session_key, &session_data, session.expires_at.timestamp() as u64).await
-            .map_err(|e| AppError::internal(&format!("Redis set failed: {}", e)))?;
-
+        // Store session with RedisManager
+        self.redis_manager.set_session(&session.id, &session_data, self.config.default_lifetime).await?;
+        
         // Store token -> session_id mapping
-        let _: () = conn.set_ex(&token_key, &session.id, session.expires_at.timestamp() as u64).await
-            .map_err(|e| AppError::internal(&format!("Redis set failed: {}", e)))?;
-
+        let token_key = format!("token:{}", session.token);
+        self.redis_manager.set(&token_key, &session.id, Some(self.config.default_lifetime)).await?;
+        
         // Update user session count
-        let user_sessions_key = format!("user_sessions:{}", session.user_id);
-        let _: () = conn.sadd(&user_sessions_key, &session.id).await
-            .map_err(|e| AppError::internal(&format!("Redis sadd failed: {}", e)))?;
-        let _: () = conn.expire(&user_sessions_key, self.config.default_lifetime as i64).await
-            .map_err(|e| AppError::internal(&format!("Redis expire failed: {}", e)))?;
+        let _ = self.redis_manager.increment_user_session_count(&session.user_id, self.config.default_lifetime).await;
 
         Ok(())
-    }
-
-    async fn get_redis_connection(&self) -> Result<redis::aio::Connection, AppError> {
-        self.redis.get_async_connection().await
-            .map_err(|e| AppError::internal(&format!("Redis connection failed: {}", e)))
     }
 
     async fn record_session_activity(
@@ -732,17 +552,13 @@ impl SessionManager {
             details: HashMap::new(),
         };
 
-        let mut conn = self.get_redis_connection().await?;
         let key = format!("activity:{}", session.id);
         let activity_data = serde_json::to_string(&activity)
             .map_err(|e| AppError::internal(&format!("Activity serialization failed: {}", e)))?;
 
         // Store activity (keep last 100 activities per session)
-        let _: () = conn.lpush(&key, &activity_data).await
-            .map_err(|e| AppError::internal(&format!("Redis lpush failed: {}", e)))?;
-        
-        let _: () = conn.ltrim(&key, 0, 99).await
-            .map_err(|e| AppError::internal(&format!("Redis ltrim failed: {}", e)))?;
+        self.redis_manager.lpush(&key, &activity_data).await?;
+        self.redis_manager.ltrim(&key, 0, 99).await?;
 
         Ok(())
     }
@@ -765,7 +581,7 @@ impl SecurityManager {
         ip_address: IpAddr,
         device_fingerprint: &str,
         user_agent: &str,
-    ) -> SecurityRisk {
+    ) -> RiskAssessment {
         let mut risk_score: f64 = 0.0;
         let mut risk_factors = Vec::new();
 
@@ -774,11 +590,21 @@ impl SecurityManager {
         if let Some(user_ips) = known_ips.get(user_id) {
             if !user_ips.contains(&ip_address) {
                 risk_score += 0.3;
-                risk_factors.push(RiskFactor::UnknownIpAddress);
+                risk_factors.push(RiskFactor::new(
+                    RiskFactorType::UnknownIpAddress,
+                    0.3,
+                    "Session from unknown IP address".to_string(),
+                    SecurityEventSeverity::Medium,
+                ));
             }
         } else {
             risk_score += 0.2;
-            risk_factors.push(RiskFactor::UnknownIpAddress);
+            risk_factors.push(RiskFactor::new(
+                RiskFactorType::UnknownIpAddress,
+                0.2,
+                "First session from this IP address".to_string(),
+                SecurityEventSeverity::Low,
+            ));
         }
 
         // Check known devices
@@ -786,36 +612,54 @@ impl SecurityManager {
         if let Some(user_devices) = known_devices.get(user_id) {
             if !user_devices.contains(&device_fingerprint.to_string()) {
                 risk_score += 0.2;
-                risk_factors.push(RiskFactor::UnknownDevice);
+                risk_factors.push(RiskFactor::new(
+                    RiskFactorType::UnknownDevice,
+                    0.2,
+                    "Session from unknown device".to_string(),
+                    SecurityEventSeverity::Medium,
+                ));
             }
         } else {
             risk_score += 0.1;
-            risk_factors.push(RiskFactor::UnknownDevice);
+            risk_factors.push(RiskFactor::new(
+                RiskFactorType::UnknownDevice,
+                0.1,
+                "First session from this device".to_string(),
+                SecurityEventSeverity::Low,
+            ));
         }
 
         // Check suspicious IPs
         let suspicious_ips = self.suspicious_ips.read().await;
         if suspicious_ips.contains(&ip_address) {
             risk_score += 0.5;
-            risk_factors.push(RiskFactor::SuspiciousUserAgent);
+            risk_factors.push(RiskFactor::new(
+                RiskFactorType::SuspiciousUserAgent,
+                0.5,
+                "Session from suspicious IP address".to_string(),
+                SecurityEventSeverity::High,
+            ));
         }
 
         // Determine recommended action
         let recommended_action = if risk_score >= 0.8 {
-            RecommendedAction::Block
+            SecurityAction::AccountLocked
         } else if risk_score >= 0.5 {
-            RecommendedAction::RequireMfa
+            SecurityAction::MfaRequired
         } else if risk_score >= 0.3 {
-            RecommendedAction::Monitor
+            SecurityAction::MonitorActivity
         } else {
-            RecommendedAction::Allow
+            SecurityAction::SecurityNotification
         };
 
-        SecurityRisk {
-            risk_score: risk_score.min(1.0),
-            risk_factors,
-            recommended_action,
+        // Create risk assessment using RiskAssessment from models/security.rs
+        let mut risk_assessment = RiskAssessment::new(risk_score.min(1.0));
+        for factor in risk_factors {
+            risk_assessment.add_risk_factor(factor);
         }
+        risk_assessment.add_action(recommended_action);
+
+        risk_assessment
     }
 
     async fn update_known_ip(&self, user_id: &str, ip_address: IpAddr) {
@@ -901,7 +745,7 @@ impl SessionAnalytics {
                 session_id: session_id.to_string(),
                 activity_type: ActivityType::SecurityValidation,
                 timestamp: Utc::now(),
-                ip_address: "0.0.0.0".parse().unwrap(), // Placeholder - should be passed from caller
+                ip_address: "0.0.0.0".parse().unwrap_or_else(|_| "127.0.0.1".parse().unwrap()), // Placeholder - should be passed from caller
                 user_agent: "Unknown".to_string(),
                 details: HashMap::new(),
             };
@@ -934,7 +778,7 @@ impl SessionAnalytics {
             session_id: session_id.to_string(),
             activity_type: ActivityType::SessionRevoked,
             timestamp: Utc::now(),
-            ip_address: "0.0.0.0".parse().unwrap(), // Placeholder
+            ip_address: "0.0.0.0".parse().unwrap_or_else(|_| "127.0.0.1".parse().unwrap()), // Placeholder
             user_agent: "System".to_string(),
             details,
         };

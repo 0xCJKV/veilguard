@@ -19,11 +19,12 @@ use crate::{
     config::Config,
     database::RedisManager,
     errors::AppError,
+    models::SecurityEventType,
     auth::{
         behavioral::{BehaviorAnalytics, GeoLocation},
         threat::{ThreatDetectionEngine, ThreatEvaluationResult},
         audit::{AuditEvent, AuditEventType, EventOutcome, EventSeverity},
-        ses::{SessionManager, SecurityEventType},
+        ses::{SessionManager},
         utils::{sha256_hash, is_expired, generate_secure_token},
     },
 };

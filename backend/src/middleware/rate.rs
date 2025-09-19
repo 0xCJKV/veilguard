@@ -19,12 +19,15 @@ use crate::{
         audit::AuditManager,
         BehaviorAnalytics,
         GeoLocation,
-        ses::SecurityEventType,
+    },
+    models::{
+        user::User,
+        SecurityEventType,
+        SecurityLevel,
     },
     config::Config,
     database::RedisManager,
     errors::AppError,
-    models::ses::SecurityLevel,
 };
 
 /// Rate limiting algorithms

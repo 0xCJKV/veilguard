@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 use chrono::Utc;
 use serde_json;
-use crate::{config::Config, errors::AppError, auth::ses::SecurityEventType};
+use crate::{config::Config, errors::AppError, models::security::SecurityEventType};
 
 /// Enterprise-grade Redis connection manager with connection pooling and health checks
 #[derive(Clone)]
@@ -554,6 +554,80 @@ impl RedisManager {
             Box::pin(async move {
                 let activities: Vec<String> = conn.lrange(&key, 0, limit as isize - 1).await?;
                 Ok(activities)
+            })
+        }).await
+    }
+
+    /// Get keys matching a pattern
+    pub async fn keys(&self, pattern: &str) -> Result<Vec<String>, AppError> {
+        let pattern = pattern.to_string();
+        self.execute_with_retry(|conn| {
+            let pattern = pattern.clone();
+            Box::pin(async move {
+                let keys: Vec<String> = conn.keys(pattern).await?;
+                Ok(keys)
+            })
+        }).await
+    }
+
+    /// Delete a key (alias for delete method)
+    pub async fn del(&self, key: &str) -> Result<(), AppError> {
+        self.delete(key).await?;
+        Ok(())
+    }
+
+    /// Set a key-value pair with optional expiration
+    pub async fn set(&self, key: &str, value: &str, ttl_seconds: Option<u64>) -> Result<(), AppError> {
+        match ttl_seconds {
+            Some(ttl) => self.set_with_expiry(key, value, ttl).await,
+            None => {
+                let key = key.to_string();
+                let value = value.to_string();
+                self.execute_with_retry(|conn| {
+                    let key = key.clone();
+                    let value = value.clone();
+                    Box::pin(async move {
+                        conn.set(key, value).await
+                    })
+                }).await
+            }
+        }
+    }
+
+    /// Push element to the left of a list
+    pub async fn lpush(&self, key: &str, value: &str) -> Result<(), AppError> {
+        let key = key.to_string();
+        let value = value.to_string();
+        self.execute_with_retry(|conn| {
+            let key = key.clone();
+            let value = value.clone();
+            Box::pin(async move {
+                let _: i64 = conn.lpush(key, value).await?;
+                Ok(())
+            })
+        }).await
+    }
+
+    /// Trim a list to keep only elements in the specified range
+    pub async fn ltrim(&self, key: &str, start: isize, stop: isize) -> Result<(), AppError> {
+        let key = key.to_string();
+        self.execute_with_retry(|conn| {
+            let key = key.clone();
+            Box::pin(async move {
+                let _: () = conn.ltrim(key, start, stop).await?;
+                Ok(())
+            })
+        }).await
+    }
+
+    /// Get a range of elements from a list
+    pub async fn lrange(&self, key: &str, start: isize, stop: isize) -> Result<Vec<String>, AppError> {
+        let key = key.to_string();
+        self.execute_with_retry(|conn| {
+            let key = key.clone();
+            Box::pin(async move {
+                let values: Vec<String> = conn.lrange(key, start, stop).await?;
+                Ok(values)
             })
         }).await
     }

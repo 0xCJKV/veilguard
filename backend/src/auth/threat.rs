@@ -5,9 +5,9 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use crate::errors::AppError;
-use crate::models::ses::{Session, SecurityLevel};
+use crate::models::ses::{Session};
 use crate::models::security::{
-    SecurityConfig, SecurityAction, RiskAssessment, ThreatData, EventSeverity
+    SecurityConfig, SecurityAction, RiskAssessment, ThreatData, EventSeverity, SecurityLevel
 };
 use crate::auth::behavioral::{BehaviorAnalytics, GeoLocation};
 use crate::auth::audit::{AuditEvent, AuditEventType, EventOutcome, AuditManager};
