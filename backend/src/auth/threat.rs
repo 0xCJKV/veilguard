@@ -1,5 +1,4 @@
-use chrono::{DateTime, Utc, Duration};
-use serde::{Deserialize, Serialize};
+use chrono::{Utc, Duration};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -7,9 +6,10 @@ use tokio::sync::RwLock;
 use crate::errors::AppError;
 use crate::models::ses::{Session};
 use crate::models::security::{
-    SecurityConfig, SecurityAction, RiskAssessment, ThreatData, EventSeverity, SecurityLevel
+    SecurityConfig, SecurityAction, RiskAssessment, ThreatData, SecurityLevel, GeoLocation,
+    ThreatType, ActiveThreat, ThreatEvaluationResult, IpThreatData, RiskFactor, RiskFactorType
 };
-use crate::auth::behavioral::{BehaviorAnalytics, GeoLocation};
+use crate::auth::behavioral::{BehaviorAnalytics};
 use crate::auth::audit::{AuditEvent, AuditEventType, EventOutcome, AuditManager};
 
 /// Real-time threat detection engine
@@ -18,90 +18,12 @@ pub struct ThreatDetectionEngine {
     pub config: SecurityConfig,
     /// Audit manager for logging security events
     pub audit_manager: Arc<AuditManager>,
-    /// Active threat tracking
+    /// Active threat tracking (now using ActiveThreat from models/security.rs)
     pub active_threats: Arc<RwLock<HashMap<String, ActiveThreat>>>,
-    /// IP-based threat tracking
+    /// IP-based threat tracking (now using IpThreatData from models/security.rs)
     pub ip_threats: Arc<RwLock<HashMap<IpAddr, IpThreatData>>>,
     /// User-based threat tracking (now using ThreatData from models/security.rs)
     pub user_threats: Arc<RwLock<HashMap<String, ThreatData>>>,
-}
-
-/// Active threat information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveThreat {
-    /// Threat ID
-    pub id: String,
-    /// Threat type
-    pub threat_type: ThreatType,
-    /// Risk score
-    pub risk_score: f64,
-    /// First detected timestamp
-    pub first_detected: DateTime<Utc>,
-    /// Last updated timestamp
-    pub last_updated: DateTime<Utc>,
-    /// Source IP address
-    pub source_ip: IpAddr,
-    /// User ID if known
-    pub user_id: Option<String>,
-    /// Session ID if applicable
-    pub session_id: Option<String>,
-    /// Threat details
-    pub details: HashMap<String, String>,
-    /// Actions taken (now using SecurityAction from models/security.rs)
-    pub actions_taken: Vec<SecurityAction>,
-}
-
-/// Types of security threats
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum ThreatType {
-    BruteForceAttack,
-    CredentialStuffing,
-    SessionHijacking,
-    AnomalousLocation,
-    SuspiciousDevice,
-    RapidSessionCreation,
-    PrivilegeEscalation,
-    TokenAbuse,
-    ConcurrentSessionAnomaly,
-    BehavioralAnomaly,
-}
-
-/// IP-based threat tracking data
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IpThreatData {
-    /// Failed login attempts
-    pub failed_attempts: u32,
-    /// Successful logins
-    pub successful_logins: u32,
-    /// First seen timestamp
-    pub first_seen: DateTime<Utc>,
-    /// Last activity timestamp
-    pub last_activity: DateTime<Utc>,
-    /// Countries associated with this IP
-    pub countries: Vec<String>,
-    /// User agents seen from this IP
-    pub user_agents: Vec<String>,
-    /// Whether this IP is blocked
-    pub is_blocked: bool,
-    /// Block expiration if applicable
-    pub block_expires: Option<DateTime<Utc>>,
-    /// Risk score for this IP
-    pub risk_score: f64,
-}
-
-// Remove duplicate UserThreatData - now using ThreatData from models/security.rs
-
-/// Threat evaluation result
-#[derive(Debug)]
-pub struct ThreatEvaluationResult {
-    /// Overall risk score
-    pub risk_score: f64,
-    /// Detected threats
-    pub threats: Vec<ThreatType>,
-    /// Recommended actions (now using SecurityAction from models/security.rs)
-    pub recommended_actions: Vec<SecurityAction>,
-    /// Whether immediate action is required
-    pub requires_immediate_action: bool,
 }
 
 impl ThreatDetectionEngine {
@@ -124,40 +46,76 @@ impl ThreatDetectionEngine {
         geo_data: &GeoLocation,
     ) -> Result<ThreatEvaluationResult, AppError> {
         let mut threats = Vec::new();
-        let mut risk_score: f64 = 0.0;
+        let mut risk_assessment = RiskAssessment::new(0.0);
 
         // Check for brute force attacks
         if let Some(_threat) = self.detect_brute_force(session.created_ip).await? {
             threats.push(ThreatType::BruteForceAttack);
-            risk_score += 0.8;
+            risk_assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::MultipleFailedAttempts,
+                0.8,
+                "Multiple failed login attempts detected from IP".to_string(),
+                SecurityLevel::High,
+            ));
         }
 
         // Check for anomalous location
         if self.is_anomalous_location(session, geo_data).await? {
             threats.push(ThreatType::AnomalousLocation);
-            risk_score += 0.6;
+            risk_assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::AnomalousLocation,
+                0.6,
+                "Login from unusual geographic location".to_string(),
+                SecurityLevel::High,
+            ));
         }
 
         // Check for suspicious device
         if self.is_suspicious_device(session, user_behavior).await? {
             threats.push(ThreatType::SuspiciousDevice);
-            risk_score += 0.5;
+            risk_assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::UnknownDevice,
+                0.5,
+                "Login from unrecognized device".to_string(),
+                SecurityLevel::High,
+            ));
         }
 
         // Check for rapid session creation
         if self.detect_rapid_session_creation(&session.user_id).await? {
             threats.push(ThreatType::RapidSessionCreation);
-            risk_score += 0.7;
+            risk_assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::HighVelocityRequests,
+                0.7,
+                "Rapid session creation detected".to_string(),
+                SecurityLevel::High,
+            ));
         }
 
         // Check for concurrent session anomalies
         if self.detect_concurrent_session_anomaly(session).await? {
             threats.push(ThreatType::ConcurrentSessionAnomaly);
-            risk_score += 0.4;
+            risk_assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::ConcurrentSessions,
+                0.4,
+                "Unusual number of concurrent sessions".to_string(),
+                SecurityLevel::High,
+            ));
         }
 
-        // Normalize risk score
-        risk_score = risk_score.min(1.0);
+        // Check for VPN/Proxy usage
+        if geo_data.is_vpn_proxy {
+            risk_assessment.add_risk_factor(RiskFactor::new(
+                RiskFactorType::VpnProxyUsage,
+                0.3,
+                "VPN or proxy usage detected".to_string(),
+                SecurityLevel::Low,
+            ));
+        }
+
+        // Calculate final risk score
+        risk_assessment.calculate_risk_score();
+        let risk_score = risk_assessment.risk_score;
 
         let recommended_actions = self.determine_actions(risk_score, &threats).await;
         let requires_immediate_action = risk_score > self.config.risk_thresholds.auto_revoke_threshold;
@@ -230,19 +188,19 @@ impl ThreatDetectionEngine {
         let ip_threats = self.ip_threats.read().await;
         
         if let Some(ip_data) = ip_threats.get(&ip) {
-            if ip_data.failed_attempts >= self.config.threat_config.max_failed_attempts {
+            if ip_data.base.failed_attempts >= self.config.threat_config.max_failed_attempts {
                 let threat = ActiveThreat {
                     id: format!("brute_force_{}", ip),
                     threat_type: ThreatType::BruteForceAttack,
                     risk_score: 0.9,
-                    first_detected: ip_data.first_seen,
+                    first_detected: ip_data.base.first_seen,
                     last_updated: Utc::now(),
                     source_ip: ip,
                     user_id: None,
                     session_id: None,
                     details: HashMap::from([
-                        ("failed_attempts".to_string(), ip_data.failed_attempts.to_string()),
-                        ("countries".to_string(), ip_data.countries.join(", ")),
+                        ("failed_attempts".to_string(), ip_data.base.failed_attempts.to_string()),
+                        ("countries".to_string(), ip_data.base.countries.join(", ")),
                     ]),
                     actions_taken: Vec::new(),
                 };
@@ -309,14 +267,30 @@ impl ThreatDetectionEngine {
     ) -> Vec<SecurityAction> {
         let mut actions = Vec::new();
 
-        if risk_score >= self.config.risk_thresholds.auto_revoke_threshold {
-            actions.push(SecurityAction::SessionRevoked);
-            actions.push(SecurityAction::SecurityNotification);
-        } else if risk_score >= self.config.risk_thresholds.mfa_challenge_threshold {
-            actions.push(SecurityAction::MfaRequired);
-            actions.push(SecurityAction::SecurityNotification);
-        } else if risk_score >= self.config.risk_thresholds.notification_threshold {
-            actions.push(SecurityAction::SecurityNotification);
+        // Determine security level based on risk score
+        let security_level = self.determine_security_level(risk_score);
+
+        // Apply actions based on security level
+        match security_level {
+            SecurityLevel::Critical => {
+                actions.push(SecurityAction::SessionRevoked);
+                actions.push(SecurityAction::AccountLocked);
+                actions.push(SecurityAction::SecurityNotification);
+                actions.push(SecurityAction::ContactSupport);
+            }
+            SecurityLevel::High => {
+                actions.push(SecurityAction::SessionRevoked);
+                actions.push(SecurityAction::SecurityNotification);
+                actions.push(SecurityAction::AdditionalVerificationRequired);
+            }
+            SecurityLevel::Medium => {
+                actions.push(SecurityAction::MfaRequired);
+                actions.push(SecurityAction::SecurityNotification);
+                actions.push(SecurityAction::MonitorActivity);
+            }
+            SecurityLevel::Low => {
+                actions.push(SecurityAction::SecurityNotification);
+            }
         }
 
         // Specific actions for specific threats
@@ -329,9 +303,36 @@ impl ThreatDetectionEngine {
                     actions.push(SecurityAction::AccountLocked);
                 }
                 ThreatType::SuspiciousDevice => {
+                    actions.push(SecurityAction::DeviceBlocked);
                     actions.push(SecurityAction::AdditionalVerificationRequired);
                 }
-                _ => {}
+                ThreatType::AnomalousLocation => {
+                    actions.push(SecurityAction::AdditionalVerificationRequired);
+                }
+                ThreatType::ConcurrentSessionAnomaly => {
+                    actions.push(SecurityAction::MonitorActivity);
+                }
+                ThreatType::CredentialStuffing => {
+                    actions.push(SecurityAction::IpBlocked);
+                    actions.push(SecurityAction::PasswordResetRequired);
+                }
+                ThreatType::SessionHijacking => {
+                    actions.push(SecurityAction::SessionRevoked);
+                    actions.push(SecurityAction::ContactSupport);
+                }
+                ThreatType::PrivilegeEscalation => {
+                    actions.push(SecurityAction::SessionRevoked);
+                    actions.push(SecurityAction::AccountLocked);
+                    actions.push(SecurityAction::ContactSupport);
+                }
+                ThreatType::TokenAbuse => {
+                    actions.push(SecurityAction::SessionRevoked);
+                    actions.push(SecurityAction::AdditionalVerificationRequired);
+                }
+                ThreatType::BehavioralAnomaly => {
+                    actions.push(SecurityAction::MonitorActivity);
+                    actions.push(SecurityAction::AdditionalVerificationRequired);
+                }
             }
         }
 
@@ -341,24 +342,42 @@ impl ThreatDetectionEngine {
         actions
     }
 
+    /// Determine security level based on risk score
+    fn determine_security_level(&self, risk_score: f64) -> SecurityLevel {
+        if risk_score >= 0.9 {
+            SecurityLevel::Critical
+        } else if risk_score >= 0.7 {
+            SecurityLevel::High
+        } else if risk_score >= 0.4 {
+            SecurityLevel::Medium
+        } else {
+            SecurityLevel::Low
+        }
+    }
+
     /// Block an IP address
     async fn block_ip(&self, ip: IpAddr, duration: Duration) -> Result<(), AppError> {
         let mut ip_threats = self.ip_threats.write().await;
         
         let ip_data = ip_threats.entry(ip).or_insert_with(|| IpThreatData {
-            failed_attempts: 0,
-            successful_logins: 0,
-            first_seen: Utc::now(),
-            last_activity: Utc::now(),
-            countries: Vec::new(),
-            user_agents: Vec::new(),
-            is_blocked: false,
-            block_expires: None,
-            risk_score: 0.0,
+            base: crate::models::security::IpThreatInfo {
+                failed_attempts: 0,
+                successful_logins: 0,
+                first_seen: Utc::now(),
+                last_activity: Utc::now(),
+                countries: Vec::new(),
+                user_agents: Vec::new(),
+                is_blocked: false,
+                block_expires: None,
+                risk_score: 0.0,
+                threat_intel: None,
+            },
+            first_flagged: Utc::now(),
+            last_updated: Utc::now(),
         });
         
-        ip_data.is_blocked = true;
-        ip_data.block_expires = Some(Utc::now() + duration);
+        ip_data.base.is_blocked = true;
+        ip_data.base.block_expires = Some(Utc::now() + duration);
         
         // Log the action
         let audit_event = AuditEvent::new(
@@ -450,39 +469,45 @@ impl ThreatDetectionEngine {
         let mut ip_threats = self.ip_threats.write().await;
         
         let ip_data = ip_threats.entry(ip).or_insert_with(|| IpThreatData {
-            failed_attempts: 0,
-            successful_logins: 0,
-            first_seen: Utc::now(),
-            last_activity: Utc::now(),
-            countries: Vec::new(),
-            user_agents: Vec::new(),
-            is_blocked: false,
-            block_expires: None,
-            risk_score: 0.0,
+            base: crate::models::security::IpThreatInfo {
+                failed_attempts: 0,
+                successful_logins: 0,
+                first_seen: Utc::now(),
+                last_activity: Utc::now(),
+                countries: Vec::new(),
+                user_agents: Vec::new(),
+                is_blocked: false,
+                block_expires: None,
+                risk_score: 0.0,
+                threat_intel: None,
+            },
+            first_flagged: Utc::now(),
+            last_updated: Utc::now(),
         });
         
-        ip_data.last_activity = Utc::now();
+        ip_data.base.last_activity = Utc::now();
+        ip_data.last_updated = Utc::now();
         
         if success {
-            ip_data.successful_logins += 1;
+            ip_data.base.successful_logins += 1;
             // Reset failed attempts on successful login
-            ip_data.failed_attempts = 0;
+            ip_data.base.failed_attempts = 0;
         } else {
-            ip_data.failed_attempts += 1;
+            ip_data.base.failed_attempts += 1;
         }
         
         if let Some(country) = country {
-            if !ip_data.countries.contains(&country) {
-                ip_data.countries.push(country);
+            if !ip_data.base.countries.contains(&country) {
+                ip_data.base.countries.push(country);
             }
         }
         
-        if !ip_data.user_agents.contains(&user_agent) {
-            ip_data.user_agents.push(user_agent);
+        if !ip_data.base.user_agents.contains(&user_agent) {
+            ip_data.base.user_agents.push(user_agent);
         }
         
         // Calculate risk score based on failed attempts and other factors
-        ip_data.risk_score = (ip_data.failed_attempts as f64 / self.config.threat_config.max_failed_attempts as f64)
+        ip_data.base.risk_score = (ip_data.base.failed_attempts as f64 / self.config.threat_config.max_failed_attempts as f64)
             .min(1.0);
         
         Ok(())
@@ -493,8 +518,8 @@ impl ThreatDetectionEngine {
         let ip_threats = self.ip_threats.read().await;
         
         if let Some(ip_data) = ip_threats.get(&ip) {
-            if ip_data.is_blocked {
-                if let Some(expires) = ip_data.block_expires {
+            if ip_data.base.is_blocked {
+                if let Some(expires) = ip_data.base.block_expires {
                     return Ok(Utc::now() < expires);
                 }
                 return Ok(true);

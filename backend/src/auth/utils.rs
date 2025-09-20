@@ -5,6 +5,7 @@ use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use axum::http::HeaderMap;
 use crate::errors::AppError;
+use crate::models::security::{GeoLocation, IPinfoResponse};
 
 /// Centralized utilities for auth modules to eliminate code duplication
 /// while maintaining module independence and reusability.
@@ -382,4 +383,130 @@ pub fn is_valid_session_id(session_id: &str) -> bool {
 /// True if valid format
 pub fn is_valid_user_id(user_id: &str) -> bool {
     !user_id.is_empty() && user_id.len() <= 255 && !user_id.trim().is_empty()
+}
+
+// =============================================================================
+// ENHANCED GEOLOCATION UTILITIES
+// =============================================================================
+
+/// Get comprehensive geolocation data from IP address using IPinfo.io API
+/// 
+/// # Arguments
+/// * `ip` - Optional IP address to geolocate
+/// 
+/// # Returns
+/// GeoLocation data or error
+pub async fn get_geolocation_data(ip: Option<IpAddr>) -> Result<GeoLocation, AppError> {
+    if let Some(ip_addr) = ip {
+        // Check if it's a local/private IP
+        if is_private_ip(ip_addr) {
+            return Ok(GeoLocation {
+                current_location: (0.0, 0.0),
+                previous_location: None,
+                country_code: "US".to_string(),
+                city: Some("Local".to_string()),
+                timezone: "UTC".to_string(),
+                isp: Some("Local Network".to_string()),
+                is_vpn_proxy: false,
+            });
+        }
+        
+        // Make API call to IPinfo.io
+        let url = format!("https://ipinfo.io/{}/json", ip_addr);
+        let client = reqwest::Client::new();
+        
+        match client.get(&url).send().await {
+            Ok(response) => {
+                match response.json::<IPinfoResponse>().await {
+                    Ok(ipinfo_data) => {
+                        let (lat, lon) = if let Some(loc) = ipinfo_data.loc {
+                            let coords: Vec<&str> = loc.split(',').collect();
+                            if coords.len() == 2 {
+                                (
+                                    coords[0].parse().unwrap_or(0.0),
+                                    coords[1].parse().unwrap_or(0.0)
+                                )
+                            } else {
+                                (0.0, 0.0)
+                            }
+                        } else {
+                            (0.0, 0.0)
+                        };
+
+                        Ok(GeoLocation {
+                            current_location: (lat, lon),
+                            previous_location: None,
+                            country_code: ipinfo_data.country,
+                            city: ipinfo_data.city,
+                            timezone: ipinfo_data.timezone.unwrap_or_else(|| "UTC".to_string()),
+                            isp: ipinfo_data.org,
+                            is_vpn_proxy: false, // Could be enhanced with VPN detection
+                        })
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to parse IPinfo.io response for IP {}: {}", ip_addr, e);
+                        // Return fallback data
+                        Ok(GeoLocation {
+                            current_location: (0.0, 0.0),
+                            previous_location: None,
+                            country_code: "US".to_string(),
+                            city: Some("Unknown".to_string()),
+                            timezone: "UTC".to_string(),
+                            isp: Some("Unknown ISP".to_string()),
+                            is_vpn_proxy: false,
+                        })
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch geolocation data for IP {}: {}", ip_addr, e);
+                // Return fallback data
+                Ok(GeoLocation {
+                    current_location: (0.0, 0.0),
+                    previous_location: None,
+                    country_code: "US".to_string(),
+                    city: Some("Unknown".to_string()),
+                    timezone: "UTC".to_string(),
+                    isp: Some("Unknown ISP".to_string()),
+                    is_vpn_proxy: false,
+                })
+            }
+        }
+    } else {
+        Err(AppError::ValidationError("No IP address provided for geolocation".to_string()))
+    }
+}
+
+/// Check if a location change is suspicious based on distance and time
+/// 
+/// # Arguments
+/// * `previous_location` - Previous location coordinates
+/// * `current_location` - Current location coordinates
+/// * `time_diff_hours` - Time difference in hours
+/// * `max_distance_km` - Maximum allowed distance in kilometers
+/// 
+/// # Returns
+/// True if location change is suspicious
+pub fn is_suspicious_location_change(
+    previous_location: (f64, f64),
+    current_location: (f64, f64),
+    time_diff_hours: f64,
+    max_distance_km: f64,
+) -> bool {
+    let distance = calculate_distance(previous_location, current_location);
+    
+    // If distance is greater than max allowed, it's suspicious
+    if distance > max_distance_km {
+        return true;
+    }
+    
+    // Check if travel speed is humanly possible (max ~900 km/h for commercial flights)
+    if time_diff_hours > 0.0 {
+        let speed_kmh = distance / time_diff_hours;
+        if speed_kmh > 900.0 {
+            return true;
+        }
+    }
+    
+    false
 }

@@ -66,7 +66,7 @@ async fn main() {
     
     // Initialize session manager with RedisManager integration
     let session_config = models::ses::SessionConfig::default();
-    let session_manager = match auth::ses::SessionManager::new_with_redis_manager(&config.redis_url, session_config, redis_manager.clone()) {
+    let session_manager = match auth::ses::SessionManager::new(session_config, redis_manager.clone()) {
         Ok(manager) => {
             println!("✅ Session manager initialized successfully with Redis integration");
             Arc::new(manager)
@@ -90,12 +90,12 @@ async fn main() {
     println!("✅ Behavior analytics initialized successfully");
     
     // Initialize SessionBindingManager
-    let binding_config = auth::binding::BindingConfig::default();
+    let binding_config = models::security::SecurityConfig::default();
     let session_binding_manager = Arc::new(SessionBindingManager::new(binding_config));
     println!("✅ SessionBindingManager initialized successfully");
 
     // Initialize ThreatDetectionEngine
-    let threat_config = auth::behavioral::ThreatResponse::default();
+    let threat_config = models::security::SecurityConfig::default();
     let threat_engine = Arc::new(ThreatDetectionEngine::new(threat_config, audit_manager.clone()));
     println!("✅ ThreatDetectionEngine initialized successfully");
     

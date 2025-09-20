@@ -2,11 +2,10 @@ use chrono::{Duration, Utc};
 use rusty_paseto::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use uuid::Uuid;
 
 use crate::config::Config;
 use crate::errors::AppError;
-use super::utils::{is_expired, generate_secure_token};
+use super::utils::{is_expired};
 
 /// Standard JWT-like claims structure for PASETO tokens
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,7 +66,7 @@ impl Claims {
         }
     }
 
-    /// Check if token is expired
+    // /// Check if token is expired
     pub fn is_expired(&self) -> bool {
         is_expired(self.exp as u64)
     }
@@ -140,32 +139,8 @@ impl PasetoManager {
         })
     }
 
-    /// Generate a new access token with standard expiration (15 minutes)
-    pub fn generate_access_token(&self, user_id: &str) -> Result<String, AppError> {
-        let claims = Claims::new(
-            user_id.to_string(),
-            self.default_issuer.clone(),
-            self.default_audience.clone(),
-            Duration::minutes(15),
-        );
-
-        self.generate_token(&claims)
-    }
-
-    /// Generate a new refresh token with extended expiration (7 days)
-    pub fn generate_refresh_token(&self, user_id: &str) -> Result<String, AppError> {
-        let claims = Claims::new(
-            user_id.to_string(),
-            self.default_issuer.clone(),
-            format!("{}-refresh", self.default_audience),
-            Duration::days(7),
-        );
-
-        self.generate_token(&claims)
-    }
-
     /// Generate a new access token with embedded session ID
-    pub fn generate_access_token_with_session(&self, user_id: &str, session_id: &str) -> Result<String, AppError> {
+    pub fn generate_access_token(&self, user_id: &str, session_id: &str) -> Result<String, AppError> {
         let mut claims = Claims::new(
             user_id.to_string(),
             self.default_issuer.clone(),
@@ -180,7 +155,7 @@ impl PasetoManager {
     }
 
     /// Generate a new refresh token with embedded session ID
-    pub fn generate_refresh_token_with_session(&self, user_id: &str, session_id: &str) -> Result<String, AppError> {
+    pub fn generate_refresh_token(&self, user_id: &str, session_id: &str) -> Result<String, AppError> {
         let mut claims = Claims::new(
             user_id.to_string(),
             self.default_issuer.clone(),
@@ -193,24 +168,6 @@ impl PasetoManager {
 
         self.generate_token(&claims)
     }
-
-    /// Generate a custom token with specific claims and expiration
-    // pub fn generate_custom_token(
-    //     &self,
-    //     user_id: &str,
-    //     expires_in: Duration,
-    //     custom_claims: HashMap<String, serde_json::Value>,
-    // ) -> Result<String, AppError> {
-    //     let mut claims = Claims::new(
-    //         user_id.to_string(),
-    //         self.default_issuer.clone(),
-    //         self.default_audience.clone(),
-    //         expires_in,
-    //     );
-
-    //     claims.custom = custom_claims;
-    //     self.generate_token(&claims)
-    // }
 
     /// Generate a token from claims
     fn generate_token(&self, claims: &Claims) -> Result<String, AppError> {
@@ -271,9 +228,9 @@ impl PasetoManager {
     /// Rotate access token (generate new token and return both old and new JTIs)
     pub fn rotate_access_token(&self, user_id: &str, session_id: Option<&str>) -> Result<(String, String, String), AppError> {
         let new_token = if let Some(session_id) = session_id {
-            self.generate_access_token_with_session(user_id, session_id)?
+            self.generate_access_token(user_id, session_id)?
         } else {
-            self.generate_access_token(user_id)?
+            return Err(AppError::ValidationError("Session ID required for token rotation".to_string()));
         };
 
         // Extract JTI from new token
@@ -289,9 +246,9 @@ impl PasetoManager {
     /// Rotate refresh token (generate new token and return both old and new JTIs)
     pub fn rotate_refresh_token(&self, user_id: &str, session_id: Option<&str>) -> Result<(String, String, String), AppError> {
         let new_token = if let Some(session_id) = session_id {
-            self.generate_refresh_token_with_session(user_id, session_id)?
+            self.generate_refresh_token(user_id, session_id)?
         } else {
-            self.generate_refresh_token(user_id)?
+            return Err(AppError::ValidationError("Session ID required for token rotation".to_string()));
         };
 
         // Extract JTI from new token
@@ -318,8 +275,8 @@ impl PasetoManager {
 
     /// Generate token pair (access + refresh) with rotation tracking
     pub fn generate_token_pair_with_rotation(&self, user_id: &str, session_id: &str) -> Result<(String, String, String, String), AppError> {
-        let access_token = self.generate_access_token_with_session(user_id, session_id)?;
-        let refresh_token = self.generate_refresh_token_with_session(user_id, session_id)?;
+        let access_token = self.generate_access_token(user_id, session_id)?;
+        let refresh_token = self.generate_refresh_token(user_id, session_id)?;
 
         let access_claims = self.validate_token(&access_token)?;
         let refresh_claims = self.validate_token(&refresh_token)?;

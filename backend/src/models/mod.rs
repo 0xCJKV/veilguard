@@ -5,8 +5,9 @@ pub mod security;
 pub use ses::{Session, SessionMetadata, SessionFlags, CreateSessionRequest, SessionValidationResult, ValidationError, SecurityWarning, SessionConfig};
 pub use user::{User, CreateUserRequest, UpdateUserRequest, LoginRequest, UserResponse};
 pub use security::{
-    SecurityConfig, RiskAssessment, RiskFactor, RiskFactorType, SecurityAction, EventSeverity,
-    SessionMetrics, RiskThresholds, BindingConfig, ThreatConfig, AuditConfig, BehavioralConfig,
-    ThreatData, IpThreatInfo, UserThreatInfo, ThreatIntelligence, BehavioralProfile, ThreatStatistics, DailyStats,
-    SecurityLevel, SessionActivity, ActivityType, SecurityEvent, SecurityEventType, DeviceFingerprinting
+    SessionMetrics, SessionActivity, ActivityType, SecurityConfig, RiskThresholds, BindingConfig,
+    ThreatConfig, AuditConfig, BehavioralConfig, SecurityLevel, SecurityEvent, SecurityEventType,
+    DeviceFingerprinting, RiskAssessment, RiskFactor, RiskFactorType, SecurityAction,
+    ThreatData, IpThreatInfo, UserThreatInfo, ThreatIntelligence, BehavioralProfile, GeoLocation,
+    ThreatStatistics, DailyStats, ThreatType, ActiveThreat, ThreatEvaluationResult, IpThreatData,
 };

@@ -12,25 +12,24 @@ use sha2::Sha256;
 use std::{
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
-    net::IpAddr,
 };
-use tracing::{debug, warn, error, info};
+use tracing::{debug, warn, error};
 use crate::{
     config::Config,
     database::RedisManager,
     errors::AppError,
-    models::SecurityEventType,
     auth::{
-        behavioral::{BehaviorAnalytics, GeoLocation},
-        threat::{ThreatDetectionEngine, ThreatEvaluationResult},
+        behavioral::BehaviorAnalytics,
+        threat::{ThreatDetectionEngine},
         audit::{AuditEvent, AuditEventType, EventOutcome, EventSeverity},
         ses::{SessionManager},
         utils::{sha256_hash, is_expired, generate_secure_token},
     },
+    models::security::GeoLocation,
 };
 
 type HmacSha256 = Hmac<Sha256>;
-
+// TODO:
 #[derive(Debug, Clone)]
 pub struct CsrfConfig {
     /// Secret key for HMAC signing (must be 32+ bytes for security)
@@ -296,6 +295,191 @@ impl CsrfProtection {
         self
     }
 
+    /// Enhanced origin and referer validation
+    pub async fn validate_origin_and_referer(&self, headers: &HeaderMap) -> Result<(), StatusCode> {
+        // Check Origin header first (preferred for CORS requests)
+        if let Some(origin) = headers.get("origin").and_then(|h| h.to_str().ok()) {
+            if !self.is_valid_origin(origin) {
+                warn!("Invalid origin detected: {}", origin);
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        // Fallback to Referer header for same-origin requests
+        else if let Some(referer) = headers.get("referer").and_then(|h| h.to_str().ok()) {
+            if !self.is_valid_referer(referer) {
+                warn!("Invalid referer detected: {}", referer);
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        // If neither Origin nor Referer is present, this might be suspicious
+        else {
+            warn!("Neither Origin nor Referer header present in CSRF-protected request");
+            // Allow for now but log the event - some legitimate requests might not have these headers
+        }
+
+        Ok(())
+    }
+
+    /// Validate if the origin is allowed
+    fn is_valid_origin(&self, origin: &str) -> bool {
+        // TODO: This should be configurable based on allowed origins
+        // For now, implement basic validation
+        if origin.starts_with("https://") || origin.starts_with("http://localhost") {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Validate if the referer is from the same origin
+    fn is_valid_referer(&self, referer: &str) -> bool {
+        // TODO: This should validate against the application's domain
+        // For now, implement basic validation
+        if referer.starts_with("https://") || referer.contains("localhost") {
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Enhanced token validation with origin/referer checks and replay detection
+    pub async fn validate_token_enhanced(
+        &self,
+        token_value: &str,
+        session_id: &str,
+        user_id: Option<&str>,
+        ip_address: Option<&str>,
+        user_agent: Option<&str>,
+        headers: &HeaderMap,
+    ) -> Result<bool, AppError> {
+        // First validate origin and referer headers
+        if let Err(_) = self.validate_origin_and_referer(headers).await {
+            return Ok(false);
+        }
+
+        // Check for token replay attacks
+        if self.is_token_replayed(token_value, session_id).await? {
+            return Ok(false);
+        }
+
+        // Check rate limiting
+        if self.is_token_usage_rate_limited(session_id).await? {
+            return Ok(false);
+        }
+
+        // Perform standard token validation
+        self.validate_token(token_value, session_id, user_id, ip_address, user_agent).await
+    }
+
+    /// Extract CSRF token from cookie for double-submit validation
+    fn extract_csrf_cookie(&self, headers: &HeaderMap) -> Option<String> {
+        headers.get("cookie")
+            .and_then(|cookie_header| cookie_header.to_str().ok())
+            .and_then(|cookies| {
+                cookies.split(';')
+                    .find_map(|cookie| {
+                        let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
+                        if parts.len() == 2 && parts[0] == self.config.cookie_name {
+                            Some(parts[1].to_string())
+                        } else {
+                            None
+                        }
+                    })
+            })
+    }
+
+    /// Check if token is being replayed (used multiple times suspiciously)
+    async fn is_token_replayed(&self, token_value: &str, session_id: &str) -> Result<bool, AppError> {
+        let token_id = self.extract_token_id(token_value)?;
+        let usage_key = format!("csrf:token_usage:{}:{}", session_id, token_id);
+        
+        match self.redis.increment_rate_limit(&usage_key, 3600).await {
+            Ok(count) => {
+                // Check if usage exceeds reasonable threshold
+                Ok(count > 10) // Allow up to 10 uses per hour
+            }
+            Err(_) => Ok(false), // Allow on Redis error
+        }
+    }
+
+    /// Check if token usage is rate limited for this session
+    async fn is_token_usage_rate_limited(&self, session_id: &str) -> Result<bool, AppError> {
+        let rate_key = format!("csrf:rate:{}:{}", session_id, current_timestamp() / 60); // Per minute
+        
+        match self.redis.increment_rate_limit(&rate_key, 60).await {
+            Ok(count) => {
+                // Allow up to 10 token validations per minute per session
+                Ok(count > 10)
+            }
+            Err(_) => Ok(false), // Allow on Redis error
+        }
+    }
+
+    /// Log security events for audit trail
+    pub async fn log_security_event(
+        &self,
+        session_id: &str,
+        user_id: Option<&str>,
+        ip_address: Option<&str>,
+        event_description: &str,
+        severity: EventSeverity,
+    ) -> Result<(), AppError> {
+        use std::collections::HashMap;
+        use std::net::IpAddr;
+        use chrono::Utc;
+        
+        let source_ip = ip_address
+            .and_then(|ip| ip.parse::<IpAddr>().ok())
+            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0)));
+            
+        let mut metadata = HashMap::new();
+        if let Some(sid) = Some(session_id) {
+            metadata.insert("session_id".to_string(), sid.to_string());
+        }
+        if let Some(uid) = user_id {
+            metadata.insert("user_id".to_string(), uid.to_string());
+        }
+        
+        let audit_event = AuditEvent {
+            id: generate_secure_token(16)?,
+            event_type: AuditEventType::SecurityViolation,
+            timestamp: Utc::now(),
+            source_ip,
+            user_agent: None,
+            user_id: user_id.map(|s| s.to_string()),
+            session_id: Some(session_id.to_string()),
+            resource: Some("csrf_protection".to_string()),
+            action: "validation".to_string(),
+            outcome: EventOutcome::Failure,
+            severity,
+            risk_score: None,
+            metadata,
+            error_message: Some(event_description.to_string()),
+        };
+
+        // Store audit event in Redis for later processing
+        let audit_key = format!("audit:csrf:{}", audit_event.id);
+        if let Ok(serialized) = serde_json::to_string(&audit_event) {
+            let _ = self.redis.set_with_expiry(&audit_key, &serialized, 86400 * 30).await; // 30 days
+        }
+        
+        Ok(())
+    }
+
+    /// Log token usage for analytics
+    pub async fn log_token_usage(&self, session_id: &str, token_value: &str, success: bool) {
+        let usage_event = serde_json::json!({
+            "session_id": session_id,
+            "token_id": self.extract_token_id(token_value).unwrap_or_default(),
+            "success": success,
+            "timestamp": current_timestamp(),
+        });
+
+        let usage_key = format!("csrf:usage:{}:{}", session_id, current_timestamp() / 3600); // Hourly buckets
+        let _ = self.redis.lpush(&usage_key, &usage_event.to_string()).await;
+        let _ = self.redis.expire(&usage_key, 86400 * 7).await; // Keep for 7 days
+    }
+
     /// Generate a new CSRF token with behavioral analytics and risk assessment
     pub async fn generate_token(
         &self,
@@ -317,12 +501,12 @@ impl CsrfProtection {
                 warn!("High risk CSRF token generation attempt blocked: score={}", score);
                 
                 // Log security event
-                let _ = self.redis.add_security_event(
-                    user_id.as_deref().unwrap_or("unknown"),
-                    SecurityEventType::SecurityViolation,
+                let _ = self.log_security_event(
+                    &session_id,
+                    user_id.as_deref(),
+                    ip_address.as_deref(),
                     "High-risk CSRF token generation blocked",
-                    ip_address.as_deref().and_then(|ip| ip.parse::<IpAddr>().ok()).unwrap_or("127.0.0.1".parse().unwrap()),
-                    &user_agent.unwrap_or_default()
+                    EventSeverity::High,
                 ).await;
                 
                 return Err(AppError::SecurityViolation("Token generation blocked due to high risk".to_string()));
@@ -528,7 +712,7 @@ impl CsrfProtection {
 
         // Check time-based anomalies
         let current_time = current_timestamp();
-        let time_since_creation = current_time - token.created_at;
+        let _time_since_creation = current_time - token.created_at;
         let time_since_last_use = current_time - token.last_used;
 
         // Flag rapid successive usage (potential automation)
@@ -723,8 +907,8 @@ impl CsrfProtection {
 /// CSRF protection middleware
 pub async fn csrf_protection_middleware(
     State(csrf): State<Arc<CsrfProtection>>,
-    Extension(threat_engine): Extension<Arc<ThreatDetectionEngine>>,
-    Extension(session_manager): Extension<Arc<SessionManager>>,
+    _threat_engine: Extension<Arc<ThreatDetectionEngine>>,
+    _session_manager: Extension<Arc<SessionManager>>,
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
@@ -744,11 +928,27 @@ pub async fn csrf_protection_middleware(
         return Ok(next.run(request).await);
     }
 
+    // Enhanced origin validation
+    if let Err(status) = csrf.validate_origin_and_referer(headers).await {
+        warn!("Origin/Referer validation failed for request to {}", path);
+        return Err(status);
+    }
+
     // Extract required information from request
     let token_value = match csrf.extract_token_from_request(headers) {
         Some(token) => token,
         None => {
             warn!("CSRF token missing from request to {}", path);
+            // Log security event for missing CSRF token
+            if let Some(session_id) = csrf.extract_session_id(headers) {
+                let _ = csrf.log_security_event(
+                    &session_id,
+                    csrf.extract_user_id(headers).as_deref(),
+                    csrf.extract_ip_address(headers).as_deref(),
+                    "CSRF token missing from protected request",
+                    EventSeverity::Medium,
+                ).await;
+            }
             return Err(StatusCode::FORBIDDEN);
         }
     };
@@ -765,24 +965,44 @@ pub async fn csrf_protection_middleware(
     let ip_address = csrf.extract_ip_address(headers);
     let user_agent = csrf.extract_user_agent(headers);
 
-    // Validate CSRF token
-    match csrf.validate_token(
+    // Validate CSRF token with enhanced security checks
+    match csrf.validate_token_enhanced(
         &token_value,
         &session_id,
         user_id.as_deref(),
         ip_address.as_deref(),
         user_agent.as_deref(),
+        headers,
     ).await {
         Ok(true) => {
             debug!("CSRF token validation successful for {}", path);
+            // Log successful validation for analytics
+            csrf.log_token_usage(&session_id, &token_value, true).await;
             Ok(next.run(request).await)
         }
         Ok(false) => {
             warn!("CSRF token validation failed for {}", path);
+            // Log failed validation attempt
+            let _ = csrf.log_security_event(
+                &session_id,
+                user_id.as_deref(),
+                ip_address.as_deref(),
+                "CSRF token validation failed",
+                EventSeverity::High,
+            ).await;
+            csrf.log_token_usage(&session_id, &token_value, false).await;
             Err(StatusCode::FORBIDDEN)
         }
         Err(e) => {
             error!("CSRF validation error: {}", e);
+            // Log system error
+            let _ = csrf.log_security_event(
+                &session_id,
+                user_id.as_deref(),
+                ip_address.as_deref(),
+                &format!("CSRF validation system error: {}", e),
+                EventSeverity::Critical,
+            ).await;
             Err(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }

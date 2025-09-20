@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use crate::errors::AppError;
-use crate::models::security::{SecurityLevel, SessionActivity, ActivityType, SecurityEvent, SecurityEventType, DeviceFingerprinting};
+use crate::models::security::SecurityLevel;
 
 /// Session data structure with comprehensive security metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,10 +212,9 @@ impl Session {
         // Set expiration based on security level
         let expires_at = match security_level {
             SecurityLevel::Low => now + chrono::Duration::hours(24),
-            SecurityLevel::Standard => now + chrono::Duration::hours(8),
-            SecurityLevel::High => now + chrono::Duration::hours(2),
-            SecurityLevel::Administrative => now + chrono::Duration::hours(1),
-            SecurityLevel::Critical => now + chrono::Duration::minutes(30), // Shortest expiration for critical level
+            SecurityLevel::Medium => now + chrono::Duration::hours(8),
+            SecurityLevel::High => now + chrono::Duration::hours(4),
+            SecurityLevel::Critical => now + chrono::Duration::hours(1),
         };
 
         Self {

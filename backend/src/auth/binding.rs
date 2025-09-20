@@ -6,8 +6,8 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use crate::errors::AppError;
 use crate::models::ses::Session;
-use crate::models::security::{SecurityConfig, SecurityAction, EventSeverity};
-use super::utils::{sha256_hash, sha256_hash_multiple, generate_secure_token};
+use crate::models::security::{SecurityConfig, SecurityAction};
+use super::utils::{sha256_hash_multiple};
 
 /// Session binding manager for cryptographic session security
 pub struct SessionBindingManager {
@@ -362,24 +362,25 @@ impl SessionBindingManager {
 
     /// Generate browser fingerprint from device components
     fn generate_browser_fingerprint(&self, device: &DeviceFingerprint) -> Result<String, AppError> {
-        let mut hasher = Sha256::new();
-        hasher.update(device.user_agent.as_bytes());
+        // Collect all components for hashing
+        let mut components = vec![device.user_agent.as_str()];
         
-        // Combine key browser-specific attributes
+        // Add optional components if they exist
         if let Some(ref resolution) = device.screen_resolution {
-            hasher.update(resolution.as_bytes());
+            components.push(resolution);
         }
         
         if let Some(ref canvas) = device.canvas_fingerprint {
-            hasher.update(canvas.as_bytes());
+            components.push(canvas);
         }
         
         if let Some(ref webgl) = device.webgl_renderer {
-            hasher.update(webgl.as_bytes());
+            components.push(webgl);
         }
         
-        let result = hasher.finalize();
-        Ok(hex::encode(result)[..16].to_string()) // Shorter fingerprint for browser
+        // Use the utility function for consistent hashing
+        let hash = sha256_hash_multiple(&components);
+        Ok(hash[..16].to_string()) // Shorter fingerprint for browser
     }
 
     /// Get binding for a session

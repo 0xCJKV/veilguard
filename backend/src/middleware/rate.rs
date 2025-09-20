@@ -14,17 +14,14 @@ use std::{
 use tracing::{debug, warn, error, info};
 use crate::{
     auth::{
-        threat::{ThreatDetectionEngine, ThreatType},
+        threat::ThreatDetectionEngine,
         ses::SessionManager,
-        audit::AuditManager,
-        BehaviorAnalytics,
-        GeoLocation,
+        audit::{AuditManager, AuditEvent, AuditEventType, EventOutcome, EventSeverity},
+        binding::{SessionBindingManager, DeviceFingerprint},
+        behavioral::BehaviorAnalytics,
+        utils::{extract_ip_from_headers, get_geolocation_data},
     },
-    models::{
-        user::User,
-        SecurityEventType,
-        SecurityLevel,
-    },
+    models::security::{SecurityLevel, SecurityEventType, ThreatType, GeoLocation},
     config::Config,
     database::RedisManager,
     errors::AppError,
@@ -74,7 +71,7 @@ impl Default for RateLimitConfig {
     fn default() -> Self {
         let mut security_level_limits = HashMap::new();
         security_level_limits.insert(SecurityLevel::Low, 200);
-        security_level_limits.insert(SecurityLevel::Standard, 100);
+        security_level_limits.insert(SecurityLevel::Medium, 100);
         security_level_limits.insert(SecurityLevel::High, 50);
         security_level_limits.insert(SecurityLevel::Critical, 20);
 
@@ -108,6 +105,7 @@ pub struct RateLimiter {
     threat_engine: Option<Arc<ThreatDetectionEngine>>,
     session_manager: Option<Arc<SessionManager>>,
     audit_manager: Option<Arc<AuditManager>>,
+    binding_manager: Option<Arc<SessionBindingManager>>,
 }
 
 impl RateLimiter {
@@ -118,6 +116,7 @@ impl RateLimiter {
             threat_engine: None,
             session_manager: None,
             audit_manager: None,
+            binding_manager: None,
         }
     }
 
@@ -136,51 +135,126 @@ impl RateLimiter {
         self
     }
 
-    /// Extract client identifier from request with enhanced context
+    pub fn with_binding_manager(mut self, binding_manager: Arc<SessionBindingManager>) -> Self {
+        self.binding_manager = Some(binding_manager);
+        self
+    }
+
+    /// Extract client identifier with enhanced device fingerprinting
     fn extract_client_id(&self, headers: &HeaderMap, ip: Option<IpAddr>) -> String {
         // Priority order for client identification:
         // 1. X-Forwarded-For (for load balancers/proxies)
         // 2. X-Real-IP (for reverse proxies)
         // 3. Direct IP address
-        // 4. User-Agent + IP combination for additional uniqueness
+        // 4. Device fingerprint + IP combination for enhanced uniqueness
 
-        if let Some(forwarded) = headers.get("x-forwarded-for") {
+        let actual_ip = if let Some(forwarded) = headers.get("x-forwarded-for") {
             if let Ok(forwarded_str) = forwarded.to_str() {
                 // Take the first IP in the chain (original client)
                 if let Some(first_ip) = forwarded_str.split(',').next() {
                     let clean_ip = first_ip.trim();
-                    if let Ok(parsed_ip) = clean_ip.parse::<IpAddr>() {
-                        return format!("ip:{}", parsed_ip);
-                    }
+                    clean_ip.parse::<IpAddr>().ok()
+                } else {
+                    None
                 }
+            } else {
+                None
             }
-        }
-
-        if let Some(real_ip) = headers.get("x-real-ip") {
+        } else if let Some(real_ip) = headers.get("x-real-ip") {
             if let Ok(real_ip_str) = real_ip.to_str() {
-                if let Ok(parsed_ip) = real_ip_str.parse::<IpAddr>() {
-                    return format!("ip:{}", parsed_ip);
-                }
+                real_ip_str.parse::<IpAddr>().ok()
+            } else {
+                None
             }
-        }
+        } else {
+            ip
+        };
 
-        if let Some(ip_addr) = ip {
-            return format!("ip:{}", ip_addr);
+        let user_agent = headers
+            .get("user-agent")
+            .and_then(|h| h.to_str().ok())
+            .unwrap_or("unknown");
+            
+        // Create comprehensive device fingerprint
+        let device_fingerprint = DeviceFingerprint::comprehensive(
+            user_agent.to_string(),
+            headers.get("screen-resolution").and_then(|h| h.to_str().ok()).map(|s| s.to_string()),
+            headers.get("timezone").and_then(|h| h.to_str().ok()).map(|s| s.to_string()),
+            headers.get("accept-language")
+                .and_then(|h| h.to_str().ok())
+                .map(|s| s.split(',').map(|lang| lang.trim().to_string()).collect())
+                .unwrap_or_else(Vec::new),
+            headers.get("sec-ch-ua-platform").and_then(|h| h.to_str().ok()).map(|s| s.to_string()),
+            headers.get("hardware-concurrency")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.parse().ok()),
+            headers.get("device-memory")
+                .and_then(|h| h.to_str().ok())
+                .and_then(|s| s.parse().ok()),
+            headers.get("webgl-renderer").and_then(|h| h.to_str().ok()).map(|s| s.to_string()),
+            headers.get("canvas-fingerprint").and_then(|h| h.to_str().ok()).map(|s| s.to_string()),
+            headers.get("audio-fingerprint").and_then(|h| h.to_str().ok()).map(|s| s.to_string()),
+        );
+        
+        // Generate a more sophisticated client ID using device fingerprint hash
+        let fingerprint_hash = self.hash_device_fingerprint(&device_fingerprint);
+        
+        if let Some(ip_addr) = actual_ip {
+            format!("{}:{}", ip_addr, fingerprint_hash)
+        } else {
+            format!("ua:{}", fingerprint_hash)
         }
-
-        // Fallback: use User-Agent hash if no IP available
-        if let Some(user_agent) = headers.get("user-agent") {
-            if let Ok(ua_str) = user_agent.to_str() {
-                return format!("ua:{}", sha256_hash(ua_str));
-            }
+    }
+    
+    /// Hash device fingerprint for client identification
+    fn hash_device_fingerprint(&self, fingerprint: &DeviceFingerprint) -> String {
+        use sha2::{Sha256, Digest};
+        
+        let mut hasher = Sha256::new();
+        hasher.update(fingerprint.user_agent.as_bytes());
+        
+        if let Some(ref resolution) = fingerprint.screen_resolution {
+            hasher.update(resolution.as_bytes());
         }
-
-        // Ultimate fallback
-        "unknown".to_string()
+        
+        if let Some(ref timezone) = fingerprint.timezone {
+            hasher.update(timezone.as_bytes());
+        }
+        
+        for lang in &fingerprint.languages {
+            hasher.update(lang.as_bytes());
+        }
+        
+        if let Some(ref platform) = fingerprint.platform {
+            hasher.update(platform.as_bytes());
+        }
+        
+        if let Some(concurrency) = fingerprint.hardware_concurrency {
+            hasher.update(concurrency.to_string().as_bytes());
+        }
+        
+        if let Some(memory) = fingerprint.device_memory {
+            hasher.update(memory.to_string().as_bytes());
+        }
+        
+        if let Some(ref webgl) = fingerprint.webgl_renderer {
+            hasher.update(webgl.as_bytes());
+        }
+        
+        if let Some(ref canvas) = fingerprint.canvas_fingerprint {
+            hasher.update(canvas.as_bytes());
+        }
+        
+        if let Some(ref audio) = fingerprint.audio_fingerprint {
+            hasher.update(audio.as_bytes());
+        }
+        
+        let result = hasher.finalize();
+        format!("{:x}", &result[..8].iter().fold(0u64, |acc, &b| (acc << 8) | b as u64))
     }
 
-    /// Extract session information for behavioral analysis
-    async fn extract_session_context(&self, headers: &HeaderMap) -> Option<(String, String)> {
+    /// Extract session information for behavioral analysis with binding validation
+    async fn extract_session_context(&self, headers: &HeaderMap, ip: Option<IpAddr>) -> Option<(String, String)> {
         if let Some(ref session_manager) = self.session_manager {
             // Try to extract session ID from various sources
             if let Some(session_cookie) = headers.get("cookie") {
@@ -191,6 +265,39 @@ impl RateLimiter {
                         if cookie.starts_with("session_id=") {
                             let session_id = cookie.strip_prefix("session_id=").unwrap_or("");
                             if let Ok(Some(session)) = session_manager.get_session(session_id).await {
+                                // Validate session binding if binding manager is available
+                                if let Some(ref binding_manager) = self.binding_manager {
+                                    // Extract device fingerprint from headers
+                                    let user_agent = headers.get("user-agent")
+                                        .and_then(|h| h.to_str().ok())
+                                        .unwrap_or("");
+                                    
+                                    // Validate session binding
+                                    let device_fingerprint = DeviceFingerprint::from_user_agent(user_agent.to_string());
+                                    match binding_manager.validate_binding(session_id, ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0))), &device_fingerprint, None) {
+                                        Ok(validation_result) => {
+                                            let is_valid = validation_result.is_valid;
+                                            if !is_valid {
+                                                warn!("Session binding validation failed for session {}", session_id);
+                                                // Log security violation
+                                                if let Some(ref audit_manager) = self.audit_manager {
+                                                    let _ = audit_manager.log_security_violation(
+                                                        Some(&session.user_id),
+                                                        Some(session_id),
+                                                        ip.unwrap_or("127.0.0.1".parse().unwrap()),
+                                                        "session_binding_mismatch",
+                                                        0.8,
+                                                    ).await;
+                                                }
+                                                return None; // Reject invalid session
+                                            }
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to validate session binding: {}", e);
+                                        }
+                                    }
+                                }
+                                
                                 return Some((session_id.to_string(), session.user_id));
                             }
                         }
@@ -198,16 +305,6 @@ impl RateLimiter {
                 }
             }
 
-            // Try Authorization header
-            if let Some(auth_header) = headers.get("authorization") {
-                if let Ok(auth_str) = auth_header.to_str() {
-                    if auth_str.starts_with("Bearer ") {
-                        // Extract token and try to get session info
-                        // This would require PASETO token parsing
-                        // For now, we'll skip this implementation
-                    }
-                }
-            }
         }
         None
     }
@@ -236,19 +333,31 @@ impl RateLimiter {
                         dynamic_limit = dynamic_limit.min(level_limit as f32);
                     }
 
+                    // Load behavioral analytics data (simplified approach)
+                    let mut user_behavior = BehaviorAnalytics::new();
+                    
+                    // Get real geolocation data from IP first
+                    let geo_data = match self.get_geolocation_data(ip).await {
+                        Ok(geo) => geo,
+                        Err(e) => {
+                            debug!("Failed to get geolocation for IP {:?}: {}", ip, e);
+                            GeoLocation {
+                                current_location: (0.0, 0.0),
+                                previous_location: None,
+                                country_code: "US".to_string(),
+                                city: Some("Unknown".to_string()),
+                                timezone: "UTC".to_string(),
+                                isp: None,
+                                is_vpn_proxy: false,
+                            }
+                        }
+                    };
+                    
+                    // Initialize with current session data and geolocation
+                    user_behavior.update_with_session(&session, &geo_data);
+
                     // Perform threat evaluation if available
                     if let Some(ref threat_engine) = self.threat_engine {
-                        let user_behavior = BehaviorAnalytics::new(); // TODO: Load from database
-                        let geo_data = GeoLocation {
-                            current_location: (0.0, 0.0), // TODO: Get from IP geolocation service
-                            previous_location: None,
-                            country_code: "US".to_string(),
-                            city: None,
-                            timezone: "UTC".to_string(),
-                            isp: None,
-                            is_vpn_proxy: false,
-                        };
-
                         match threat_engine.evaluate_session_threats(&session, &user_behavior, &geo_data).await {
                             Ok(evaluation) => {
                                 // Apply risk-based adjustments
@@ -259,6 +368,26 @@ impl RateLimiter {
                                     
                                     info!("Applied rate limit penalty for high-risk user {}: factor={:.2}, new_limit={:.0}", 
                                           user_id, penalty_factor, dynamic_limit);
+                                    
+                                    // Log rate limit penalty event
+                                    if let Some(ref audit_manager) = self.audit_manager {
+                                        let event = AuditEvent::new(
+                                            AuditEventType::SecurityViolation,
+                                            ip.unwrap_or("127.0.0.1".parse().unwrap()),
+                                            user_agent.map(|s| s.to_string()),
+                                            "rate_limit_penalty_applied".to_string(),
+                                        )
+                                        .with_user(user_id.to_string())
+                                        .with_session(session_id.to_string())
+                                        .with_outcome(EventOutcome::Warning)
+                                        .with_severity(EventSeverity::Medium)
+                                        .with_risk_score(evaluation.risk_score)
+                                        .with_metadata("penalty_factor".to_string(), penalty_factor.to_string())
+                                        .with_metadata("original_limit".to_string(), base_limit.to_string())
+                                        .with_metadata("new_limit".to_string(), dynamic_limit.to_string());
+                                        
+                                        let _ = audit_manager.log_event(&event).await;
+                                    }
                                 } else if evaluation.risk_score <= self.config.risk_bonus_threshold {
                                     let bonus_factor = (1.0 + (1.0 - evaluation.risk_score as f32) * (self.config.trusted_user_bonus - 1.0))
                                         .min(self.config.max_bonus_factor);
@@ -268,28 +397,37 @@ impl RateLimiter {
                                            user_id, bonus_factor, dynamic_limit);
                                 }
 
-                                // Check for specific threat indicators
+                                // Check for specific threat indicators and apply targeted penalties
                                 for threat in &evaluation.threats {
-                                    let threat_str = match threat {
-                                        ThreatType::RapidSessionCreation => "rapid_requests",
-                                        ThreatType::BehavioralAnomaly => "automated_behavior",
-                                        ThreatType::AnomalousLocation => "suspicious_location",
-                                        ThreatType::SuspiciousDevice => "device_fingerprint_mismatch",
-                                        _ => "other_threat",
+                                    let (threat_str, penalty_factor) = match threat {
+                                        ThreatType::RapidSessionCreation => ("rapid_requests", 0.2),
+                                        ThreatType::BehavioralAnomaly => ("automated_behavior", 0.3),
+                                        ThreatType::AnomalousLocation => ("suspicious_location", 0.7),
+                                        ThreatType::SuspiciousDevice => ("device_fingerprint_mismatch", 0.8),
+                                        _ => ("other_threat", 0.9),
                                     };
                                     
-                                    match threat_str {
-                                        "rapid_requests" | "automated_behavior" => {
-                                            dynamic_limit *= 0.3; // Severe penalty for automation
-                                            warn!("Detected automated behavior for user {}, applying severe rate limit penalty", user_id);
-                                        }
-                                        "suspicious_location" | "vpn_usage" => {
-                                            dynamic_limit *= 0.7; // Moderate penalty for location anomalies
-                                        }
-                                        "device_fingerprint_mismatch" => {
-                                            dynamic_limit *= 0.8; // Light penalty for device changes
-                                        }
-                                        _ => {}
+                                    dynamic_limit *= penalty_factor;
+                                    warn!("Detected {} for user {}, applying rate limit penalty: {:.1}%", 
+                                          threat_str, user_id, (1.0 - penalty_factor) * 100.0);
+                                    
+                                    // Log specific threat detection
+                                    if let Some(ref audit_manager) = self.audit_manager {
+                                        let event = AuditEvent::new(
+                                            AuditEventType::SecurityViolation,
+                                            ip.unwrap_or("127.0.0.1".parse().unwrap()),
+                                            user_agent.map(|s| s.to_string()),
+                                            format!("threat_detected_{}", threat_str),
+                                        )
+                                        .with_user(user_id.to_string())
+                                        .with_session(session_id.to_string())
+                                        .with_outcome(EventOutcome::Warning)
+                                        .with_severity(EventSeverity::High)
+                                        .with_risk_score(evaluation.risk_score)
+                                        .with_metadata("threat_type".to_string(), threat_str.to_string())
+                                        .with_metadata("penalty_factor".to_string(), penalty_factor.to_string());
+                                        
+                                        let _ = audit_manager.log_event(&event).await;
                                     }
                                 }
                             }
@@ -299,7 +437,19 @@ impl RateLimiter {
                         }
                     }
 
-                    // Check recent security events
+                    // Enhanced behavioral risk assessment
+                    let behavioral_risk = user_behavior.calculate_behavioral_risk(&session, &geo_data);
+                    if behavioral_risk > 0.8 {
+                        dynamic_limit *= 0.4; // Severe penalty for high behavioral risk
+                        warn!("Applied severe rate limit penalty for high behavioral risk: user={}, risk={:.2}", 
+                              user_id, behavioral_risk);
+                    } else if behavioral_risk > 0.6 {
+                        dynamic_limit *= 0.7; // Moderate penalty
+                        info!("Applied moderate rate limit penalty for elevated behavioral risk: user={}, risk={:.2}", 
+                              user_id, behavioral_risk);
+                    }
+
+                    // Check recent security events with more granular analysis
                     let recent_violations = session_manager.get_recent_security_events(user_id, 300).await // Last 5 minutes
                         .unwrap_or_default()
                         .into_iter()
@@ -311,12 +461,46 @@ impl RateLimiter {
                         dynamic_limit *= violation_penalty;
                         warn!("Applied rate limit penalty for recent security violations: user={}, violations={}, penalty={:.2}", 
                               user_id, recent_violations, violation_penalty);
+                        
+                        // Log cumulative violation penalty
+                        if let Some(ref audit_manager) = self.audit_manager {
+                            let event = AuditEvent::new(
+                                AuditEventType::SecurityViolation,
+                                ip.unwrap_or("127.0.0.1".parse().unwrap()),
+                                user_agent.map(|s| s.to_string()),
+                                "cumulative_violation_penalty".to_string(),
+                            )
+                            .with_user(user_id.to_string())
+                            .with_session(session_id.to_string())
+                            .with_outcome(EventOutcome::Warning)
+                            .with_severity(EventSeverity::High)
+                            .with_metadata("violation_count".to_string(), recent_violations.to_string())
+                            .with_metadata("penalty_factor".to_string(), violation_penalty.to_string());
+                            
+                            let _ = audit_manager.log_event(&event).await;
+                        }
                     }
+
+                    // Get geolocation data for behavioral analytics
+                    let geo_data = self.get_geolocation_data(ip).await.unwrap_or_else(|_| {
+                        GeoLocation {
+                            current_location: (0.0, 0.0),
+                            previous_location: None,
+                            country_code: "US".to_string(),
+                            city: Some("Unknown".to_string()),
+                            timezone: "UTC".to_string(),
+                            isp: Some("Unknown ISP".to_string()),
+                            is_vpn_proxy: false,
+                        }
+                    });
+
+                    // Update behavioral analytics with current request
+                    user_behavior.update_with_session(&session, &geo_data);
                 }
             }
         }
 
-        // Ensure minimum limit
+        // Ensure minimum limit and reasonable maximum
         let final_limit = (dynamic_limit.max(1.0) as u32).min(base_limit * 10); // Cap at 10x base limit
         
         if final_limit != base_limit {
@@ -327,7 +511,12 @@ impl RateLimiter {
         Ok(final_limit)
     }
 
-    /// Check if IP is whitelisted
+    /// Get geolocation data from IP address using shared utility
+    async fn get_geolocation_data(&self, ip: Option<IpAddr>) -> Result<GeoLocation, AppError> {
+        get_geolocation_data(ip).await
+    }
+
+    /// Check if IP is whitelisted TODO:
     fn is_whitelisted(&self, ip: Option<IpAddr>) -> bool {
         if let Some(ip_addr) = ip {
             self.config.whitelist_ips.contains(&ip_addr)
@@ -336,7 +525,7 @@ impl RateLimiter {
         }
     }
 
-    /// Check if IP is blacklisted
+    /// Check if IP is blacklisted TODO:
     fn is_blacklisted(&self, ip: Option<IpAddr>) -> bool {
         if let Some(ip_addr) = ip {
             self.config.blacklist_ips.contains(&ip_addr)
@@ -459,7 +648,7 @@ impl RateLimiter {
         // For high-risk users or sessions, use more restrictive sliding window
         // For trusted users, use more permissive token bucket
         
-        let use_strict_algorithm = if let Some((session_id, user_id)) = session_context {
+        let use_strict_algorithm = if let Some((session_id, _user_id)) = session_context {
             if let Some(ref threat_engine) = self.threat_engine {
                 if let Some(ref session_manager) = self.session_manager {
                     if let Ok(Some(session)) = session_manager.get_session(&session_id).await {
@@ -502,9 +691,21 @@ impl RateLimiter {
 
     /// Check rate limit using configured algorithm with behavioral analytics
     pub async fn check_rate_limit(&self, headers: &HeaderMap, ip: Option<IpAddr>) -> Result<RateLimitResult, AppError> {
-        // Check blacklist first
+        // Check blacklist first with enhanced threat response
         if self.is_blacklisted(ip) {
             warn!("Blocked request from blacklisted IP: {:?}", ip);
+            
+            // Enhanced threat detection for blacklisted IPs
+            if let Some(ref threat_engine) = self.threat_engine {
+                if let Some(actual_ip) = ip {
+                    let _ = threat_engine.update_ip_threat_data(
+                        actual_ip,
+                        false,
+                        None,
+                        headers.get("user-agent").and_then(|ua| ua.to_str().ok()).unwrap_or("unknown").to_string(),
+                    ).await;
+                }
+            }
             
             // Log security event
             if let Some(ref audit_manager) = self.audit_manager {
@@ -530,9 +731,25 @@ impl RateLimiter {
             });
         }
 
-        // Skip rate limiting for whitelisted IPs
+        // Skip rate limiting for whitelisted IPs with audit logging
         if self.is_whitelisted(ip) {
             debug!("Allowing whitelisted IP: {:?}", ip);
+            
+            // Log whitelisted access for audit trail
+            if let Some(ref audit_manager) = self.audit_manager {
+                let audit_event = crate::auth::audit::AuditEvent::new(
+                    crate::auth::audit::AuditEventType::DataAccess,
+                    ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0))),
+                    headers.get("user-agent").and_then(|ua| ua.to_str().ok()).map(|s| s.to_string()),
+                    "whitelist_bypass".to_string(),
+                )
+                .with_outcome(crate::auth::audit::EventOutcome::Success)
+                .with_severity(crate::auth::audit::EventSeverity::Low)
+                .with_metadata("bypass_reason".to_string(), "whitelisted_ip".to_string());
+                
+                let _ = audit_manager.log_event(&audit_event).await;
+            }
+            
             return Ok(RateLimitResult {
                 allowed: true,
                 limit: u32::MAX,
@@ -542,8 +759,8 @@ impl RateLimiter {
             });
         }
 
-        let client_id = self.extract_client_id(headers, ip);
-        let session_context = self.extract_session_context(headers).await;
+        let client_id = self.extract_client_id(&headers, ip);
+        let session_context = self.extract_session_context(headers, ip).await;
         let user_agent = headers.get("user-agent").and_then(|ua| ua.to_str().ok());
         
         debug!("Rate limiting check for client: {}, session: {:?}", client_id, session_context);
@@ -564,10 +781,11 @@ impl RateLimiter {
             RateLimitAlgorithm::Adaptive => self.check_adaptive(&client_id, dynamic_limit, session_context.clone()).await?,
         };
 
-        // Log rate limit violations
+        // Enhanced threat detection and response for rate limit violations
         if !result.allowed {
             warn!("Rate limit exceeded for client: {}, IP: {:?}, limit: {}", client_id, ip, dynamic_limit);
             
+            // Comprehensive audit logging
             if let Some(ref audit_manager) = self.audit_manager {
                 let audit_event = crate::auth::audit::AuditEvent::new(
                     crate::auth::audit::AuditEventType::SecurityViolation,
@@ -579,9 +797,42 @@ impl RateLimiter {
                 .with_session(session_context.as_ref().map(|(s, _)| s.clone()).unwrap_or_else(|| "unknown".to_string()))
                 .with_outcome(crate::auth::audit::EventOutcome::Failure)
                 .with_severity(crate::auth::audit::EventSeverity::Medium)
-                .with_error(format!("Rate limit exceeded: {}/{} requests", result.limit - result.remaining, result.limit));
+                .with_error(format!("Rate limit exceeded: {}/{} requests", result.limit - result.remaining, result.limit))
+                .with_metadata("client_id".to_string(), client_id.clone())
+                .with_metadata("algorithm".to_string(), format!("{:?}", self.config.algorithm))
+                .with_metadata("dynamic_limit".to_string(), dynamic_limit.to_string())
+                .with_metadata("remaining".to_string(), result.remaining.to_string());
                 
                 let _ = audit_manager.log_event(&audit_event).await;
+            }
+
+            // Enhanced threat detection integration
+            if let Some(ref threat_engine) = self.threat_engine {
+                if let Some(actual_ip) = ip {
+                    // Update IP threat data for rate limiting violations
+                    let _ = threat_engine.update_ip_threat_data(
+                        actual_ip,
+                        false, // Rate limit violation is a failed attempt
+                        None,  // Country data would come from geolocation
+                        user_agent.unwrap_or("unknown").to_string(),
+                    ).await;
+
+                    // Check if IP should be blocked due to repeated violations
+                    if let Ok(is_blocked) = threat_engine.is_ip_blocked(actual_ip).await {
+                        if is_blocked {
+                            warn!("IP {:?} is now blocked due to threat detection", actual_ip);
+                        }
+                    }
+                }
+
+                // Check if user should be locked due to repeated violations
+                if let Some((_, user_id)) = &session_context {
+                    if let Ok(is_locked) = threat_engine.is_user_locked(user_id).await {
+                        if is_locked {
+                            warn!("User {} is now locked due to threat detection", user_id);
+                        }
+                    }
+                }
             }
 
             // Log security event for session manager
@@ -593,6 +844,24 @@ impl RateLimiter {
                     ip.unwrap_or("127.0.0.1".parse().unwrap()),
                     &user_agent.unwrap_or_default()
                 ).await;
+            }
+        } else {
+            // Log successful rate limit checks for audit trail
+            if let Some(ref audit_manager) = self.audit_manager {
+                let audit_event = crate::auth::audit::AuditEvent::new(
+                    crate::auth::audit::AuditEventType::DataAccess,
+                    ip.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::new(0, 0, 0, 0))),
+                    user_agent.map(|s| s.to_string()),
+                    "rate_limit_check_passed".to_string(),
+                )
+                .with_user(session_context.as_ref().map(|(_, u)| u.clone()).unwrap_or_else(|| "anonymous".to_string()))
+                .with_session(session_context.as_ref().map(|(s, _)| s.clone()).unwrap_or_else(|| "none".to_string()))
+                .with_outcome(crate::auth::audit::EventOutcome::Success)
+                .with_severity(crate::auth::audit::EventSeverity::Low)
+                .with_metadata("requests_remaining".to_string(), result.remaining.to_string())
+                .with_metadata("limit".to_string(), result.limit.to_string());
+                
+                let _ = audit_manager.log_event(&audit_event).await;
             }
         }
 
@@ -664,49 +933,22 @@ pub async fn rate_limit_middleware(
 }
 
 /// Extract IP address from request
+/// Extract IP address from request using shared utility
 fn extract_ip_from_request(request: &Request) -> Option<IpAddr> {
     // Try to extract from connection info first
     if let Some(connect_info) = request.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
         return Some(connect_info.ip());
     }
 
-    // Fallback to headers
-    let headers = request.headers();
-    
-    if let Some(forwarded) = headers.get("x-forwarded-for") {
-        if let Ok(forwarded_str) = forwarded.to_str() {
-            if let Some(first_ip) = forwarded_str.split(',').next() {
-                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
-                    return Some(ip);
-                }
-            }
-        }
-    }
-
-    if let Some(real_ip) = headers.get("x-real-ip") {
-        if let Ok(real_ip_str) = real_ip.to_str() {
-            if let Ok(ip) = real_ip_str.parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
-    }
-
-    None
-}
-
-/// Simple SHA256 hash function for User-Agent
-fn sha256_hash(input: &str) -> String {
-    use sha2::{Sha256, Digest};
-    let mut hasher = Sha256::new();
-    hasher.update(input.as_bytes());
-    format!("{:x}", hasher.finalize())
+    // Fallback to headers using shared utility
+    extract_ip_from_headers(request.headers()).ok()
 }
 
 /// Create enhanced rate limiter from config with behavioral analytics
 pub fn create_rate_limiter(redis: Arc<RedisManager>, config: &Config) -> RateLimiter {
     let mut security_level_limits = HashMap::new();
     security_level_limits.insert(SecurityLevel::Low, config.rate_limit_requests * 2);
-    security_level_limits.insert(SecurityLevel::Standard, config.rate_limit_requests);
+    security_level_limits.insert(SecurityLevel::Medium, config.rate_limit_requests);
     security_level_limits.insert(SecurityLevel::High, config.rate_limit_requests / 2);
     security_level_limits.insert(SecurityLevel::Critical, config.rate_limit_requests / 5);
 

@@ -406,7 +406,7 @@ pub async fn get_session(
 
     // Check if user can access this session
     if requesting_session.user_id != session.user_id && 
-       requesting_session.security_level < SecurityLevel::Administrative {
+       requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -479,7 +479,7 @@ pub async fn revoke_session(
 
     // Check if user can revoke this session
     if requesting_session.user_id != session.user_id && 
-       requesting_session.security_level < SecurityLevel::Administrative {
+       requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -500,7 +500,7 @@ pub async fn list_sessions(
 ) -> Result<Json<SessionListResponse>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -528,7 +528,7 @@ pub async fn get_session_analytics(
 ) -> Result<Json<SessionAnalyticsResponse>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -594,7 +594,7 @@ pub async fn admin_revoke_session(
 ) -> Result<StatusCode, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -611,7 +611,7 @@ pub async fn list_user_sessions(
 ) -> Result<Json<SessionListResponse>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -640,7 +640,7 @@ pub async fn revoke_user_sessions(
 ) -> Result<StatusCode, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -662,7 +662,7 @@ pub async fn get_session_activity(
 
     // Check if user can access this session activity
     if requesting_session.user_id != session.user_id && 
-       requesting_session.security_level < SecurityLevel::Administrative {
+       requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -678,7 +678,7 @@ pub async fn get_all_session_activity(
 ) -> Result<Json<Vec<SessionActivity>>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -783,7 +783,7 @@ pub async fn get_comprehensive_session_analytics(
 ) -> Result<Json<SessionAnalyticsResponse>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -826,7 +826,7 @@ pub async fn get_behavioral_insights(
 ) -> Result<Json<BehavioralInsights>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -842,7 +842,7 @@ pub async fn get_security_dashboard(
 ) -> Result<Json<SecurityMetrics>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -857,7 +857,7 @@ pub async fn get_geographic_analysis(
 ) -> Result<Json<Vec<GeographicData>>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -872,7 +872,7 @@ pub async fn get_device_analytics(
 ) -> Result<Json<DeviceAnalytics>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -888,7 +888,7 @@ pub async fn get_anomaly_detection(
 ) -> Result<Json<AnomalyDetection>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -904,7 +904,7 @@ pub async fn get_time_series_analytics(
 ) -> Result<Json<TimeSeriesData>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -922,7 +922,7 @@ pub async fn get_user_session_analytics(
 ) -> Result<Json<UserSessionAnalytics>, AppError> {
     // Validate admin access or self-access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative && requesting_session.user_id != user_id {
+    if requesting_session.security_level < SecurityLevel::Critical && requesting_session.user_id != user_id {
         return Err(AppError::Forbidden);
     }
 
@@ -945,7 +945,7 @@ pub async fn get_session_detailed_analytics(
 
     // Check if user can access this session
     if requesting_session.user_id != session.user_id && 
-       requesting_session.security_level < SecurityLevel::Administrative {
+       requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -968,7 +968,7 @@ pub async fn get_session_behavioral_data(
 
     // Check if user can access this session
     if requesting_session.user_id != session.user_id && 
-       requesting_session.security_level < SecurityLevel::Administrative {
+       requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -990,7 +990,7 @@ pub async fn get_session_security_events(
 
     // Check if user can access this session
     if requesting_session.user_id != session.user_id && 
-       requesting_session.security_level < SecurityLevel::Administrative {
+       requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -1006,7 +1006,7 @@ pub async fn get_real_time_activity(
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -1028,7 +1028,7 @@ pub async fn bulk_revoke_sessions(
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -1063,7 +1063,7 @@ pub async fn cleanup_expired_sessions(
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -1093,7 +1093,7 @@ pub async fn export_session_data(
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 
@@ -1118,7 +1118,7 @@ pub async fn generate_session_report(
 ) -> Result<Json<serde_json::Value>, AppError> {
     // Validate admin access
     let requesting_session = extract_session_from_headers(&session_manager, &headers).await?;
-    if requesting_session.security_level < SecurityLevel::Administrative {
+    if requesting_session.security_level < SecurityLevel::Critical {
         return Err(AppError::Forbidden);
     }
 

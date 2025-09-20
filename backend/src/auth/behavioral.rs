@@ -1,33 +1,13 @@
-use chrono::{DateTime, Utc, Duration, Datelike, Timelike};
+use chrono::{DateTime, Utc, Datelike, Timelike};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
-use crate::errors::AppError;
 use crate::models::ses::{Session};
 use crate::models::security::{
-    RiskAssessment, RiskFactor, RiskFactorType, SecurityAction, EventSeverity,
-    BehavioralProfile, SessionMetrics, ActivityType, SecurityLevel
+    RiskAssessment, RiskFactor, RiskFactorType, SecurityAction, SecurityLevel,
+    BehavioralProfile, GeoLocation
 };
-use super::utils::{calculate_distance, calculate_travel_velocity};
-
-/// Geographic location data for enhanced risk assessment
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GeoLocation {
-    /// Current location coordinates
-    pub current_location: (f64, f64), // (latitude, longitude)
-    /// Previous location coordinates
-    pub previous_location: Option<(f64, f64)>,
-    /// Country code (ISO 3166-1 alpha-2)
-    pub country_code: String,
-    /// City name
-    pub city: Option<String>,
-    /// Time zone
-    pub timezone: String,
-    /// ISP information
-    pub isp: Option<String>,
-    /// Whether this is a known VPN/proxy
-    pub is_vpn_proxy: bool,
-}
+use super::utils::calculate_distance;
 
 /// Failed login attempt pattern for behavioral analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,10 +32,6 @@ pub enum FailureType {
     SuspiciousActivity,
     RateLimited,
 }
-
-// Remove duplicate ThreatResponse - now using SecurityConfig from models/security.rs
-// Remove duplicate ThreatAction - now using SecurityAction from models/security.rs
-// Remove duplicate SessionBinding - this should be in binding.rs only
 
 /// Behavioral analytics data for risk-based authentication
 /// Now uses BehavioralProfile from models/security.rs internally
@@ -192,7 +168,7 @@ impl BehaviorAnalytics {
                 RiskFactorType::UnusualLoginTime,
                 0.2,
                 format!("Login at unusual hour: {}", current_hour),
-                EventSeverity::Medium,
+                SecurityLevel::Medium,
             ));
         }
 
@@ -201,7 +177,7 @@ impl BehaviorAnalytics {
                 RiskFactorType::UnknownIpAddress,
                 0.3,
                 format!("Unknown IP address: {}", session.created_ip),
-                EventSeverity::High,
+                SecurityLevel::High,
             ));
         }
 
@@ -210,7 +186,7 @@ impl BehaviorAnalytics {
                 RiskFactorType::UnknownDevice,
                 0.25,
                 "Unknown device fingerprint".to_string(),
-                EventSeverity::High,
+                SecurityLevel::High,
             ));
         }
 
@@ -219,7 +195,7 @@ impl BehaviorAnalytics {
                 RiskFactorType::VpnProxyUsage,
                 0.4,
                 "VPN/Proxy usage detected".to_string(),
-                EventSeverity::High,
+                SecurityLevel::High,
             ));
         }
 

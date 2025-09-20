@@ -3,6 +3,30 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 
+/// GeoLocation data structure for comprehensive location tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeoLocation {
+    pub current_location: (f64, f64), // (latitude, longitude)
+    pub previous_location: Option<(f64, f64)>,
+    pub country_code: String,
+    pub city: Option<String>,
+    pub timezone: String,
+    pub isp: Option<String>,
+    pub is_vpn_proxy: bool,
+}
+
+/// IPinfo.io API response structure for geolocation data
+#[derive(Debug, Deserialize)]
+pub struct IPinfoResponse {
+    pub ip: String,
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub country: String,
+    pub loc: Option<String>, // "latitude,longitude"
+    pub org: Option<String>,
+    pub timezone: Option<String>,
+}
+
 /// Unified session metrics for analytics across all auth modules
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionMetrics {
@@ -138,7 +162,7 @@ pub struct AuditConfig {
     /// Whether to log failed events
     pub log_failures: bool,
     /// Minimum severity level to log
-    pub min_severity: EventSeverity,
+    pub min_severity: SecurityLevel,
 }
 
 /// Configuration for behavioral analysis
@@ -156,33 +180,24 @@ pub struct BehavioralConfig {
     pub min_data_points: u32,
 }
 
-/// Event severity levels
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd)]
-pub enum EventSeverity {
-    Low,
-    Medium,
-    High,
-    Critical,
-}
 
+// TODO: repurpose this lol
 /// Security levels for sessions
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Hash)]
 pub enum SecurityLevel {
     /// Low security - basic authentication
     Low,
-    /// Standard security - normal user operations
-    Standard,
+    /// Medium security - normal user operations
+    Medium,
     /// High security - sensitive operations
     High,
     /// Critical security - highest level operations
     Critical,
-    /// Administrative - admin operations
-    Administrative,
 }
 
 impl Default for SecurityLevel {
     fn default() -> Self {
-        SecurityLevel::Standard
+        SecurityLevel::Low
     }
 }
 
@@ -253,8 +268,8 @@ pub struct RiskFactor {
     pub weight: f64,
     /// Description of the risk
     pub description: String,
-    /// Severity level
-    pub severity: EventSeverity,
+    /// Security level
+    pub severity: SecurityLevel,
 }
 
 /// Types of risk factors
@@ -273,6 +288,7 @@ pub enum RiskFactorType {
     DeviceFingerprinting,
     BehavioralAnomaly,
     ThreatIntelligence,
+    SuspiciousIP,
 }
 
 /// Security actions that can be taken
@@ -419,6 +435,70 @@ pub struct DailyStats {
     pub actions_taken: u64,
 }
 
+/// Types of security threats
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ThreatType {
+    BruteForceAttack,
+    CredentialStuffing,
+    SessionHijacking,
+    AnomalousLocation,
+    SuspiciousDevice,
+    RapidSessionCreation,
+    PrivilegeEscalation,
+    TokenAbuse,
+    ConcurrentSessionAnomaly,
+    BehavioralAnomaly,
+}
+
+/// Active threat information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveThreat {
+    /// Threat ID
+    pub id: String,
+    /// Threat type
+    pub threat_type: ThreatType,
+    /// Risk score
+    pub risk_score: f64,
+    /// First detected timestamp
+    pub first_detected: DateTime<Utc>,
+    /// Last updated timestamp
+    pub last_updated: DateTime<Utc>,
+    /// Source IP address
+    pub source_ip: IpAddr,
+    /// User ID if known
+    pub user_id: Option<String>,
+    /// Session ID if applicable
+    pub session_id: Option<String>,
+    /// Threat details
+    pub details: HashMap<String, String>,
+    /// Actions taken
+    pub actions_taken: Vec<SecurityAction>,
+}
+
+/// Threat evaluation result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreatEvaluationResult {
+    /// Overall risk score
+    pub risk_score: f64,
+    /// Detected threats
+    pub threats: Vec<ThreatType>,
+    /// Recommended actions
+    pub recommended_actions: Vec<SecurityAction>,
+    /// Whether immediate action is required
+    pub requires_immediate_action: bool,
+}
+
+/// Extended IP threat data with additional tracking information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpThreatData {
+    /// Base threat information
+    pub base: IpThreatInfo,
+    /// When this IP was first flagged as suspicious
+    pub first_flagged: DateTime<Utc>,
+    /// Last time threat data was updated
+    pub last_updated: DateTime<Utc>,
+}
+
 /// Default implementations
 impl Default for SecurityConfig {
     fn default() -> Self {
@@ -474,12 +554,12 @@ impl Default for AuditConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            log_file_path: "logs/audit.log".to_string(),
-            max_file_size: 100 * 1024 * 1024, // 100MB
-            max_files: 10,
+            log_file_path: "audit.log".to_string(),
+            max_file_size: 10 * 1024 * 1024, // 10MB
+            max_files: 5,
             log_success: true,
             log_failures: true,
-            min_severity: EventSeverity::Low,
+            min_severity: SecurityLevel::Low,
         }
     }
 }
@@ -542,10 +622,10 @@ impl RiskAssessment {
 
 impl RiskFactor {
     /// Create a new risk factor
-    pub fn new(factor_type: RiskFactorType, weight: f64, description: String, severity: EventSeverity) -> Self {
+    pub fn new(factor_type: RiskFactorType, weight: f64, description: String, severity: SecurityLevel) -> Self {
         Self {
             factor_type,
-            weight: weight.clamp(0.0, 1.0),
+            weight,
             description,
             severity,
         }

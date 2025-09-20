@@ -576,6 +576,18 @@ impl RedisManager {
         Ok(())
     }
 
+    /// Set expiration time for a key
+    pub async fn expire(&self, key: &str, ttl_seconds: u64) -> Result<bool, AppError> {
+        let key = key.to_string();
+        self.execute_with_retry(|conn| {
+            let key = key.clone();
+            Box::pin(async move {
+                let result: bool = conn.expire(key, ttl_seconds as i64).await?;
+                Ok(result)
+            })
+        }).await
+    }
+
     /// Set a key-value pair with optional expiration
     pub async fn set(&self, key: &str, value: &str, ttl_seconds: Option<u64>) -> Result<(), AppError> {
         match ttl_seconds {

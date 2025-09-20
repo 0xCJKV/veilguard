@@ -64,7 +64,7 @@ pub enum EventOutcome {
     Error,
 }
 
-/// Event severity levels
+/// TODO: REMOVE
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum EventSeverity {
     Low,

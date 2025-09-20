@@ -11,10 +11,10 @@ use serde_json::Value;
 use crate::{
     auth::{
         hash_password, verify_password, PasetoManager, ses::SessionManager,
-        behavioral::{BehaviorAnalytics, GeoLocation},
+        behavioral::{BehaviorAnalytics},
         binding::{SessionBindingManager, DeviceFingerprint, TlsFingerprint},
         threat::ThreatDetectionEngine,
-        audit::{AuditManager, AuditEvent, AuditEventType, EventOutcome, EventSeverity},
+        audit::{AuditManager, AuditEventType, EventOutcome, EventSeverity},
     },
     middleware::{
         create_secure_cookie, create_delete_cookie, 
@@ -22,7 +22,7 @@ use crate::{
     },
     config::Config,
     database::{users, DbPool, redis::RedisManager},
-    models::{CreateUserRequest, LoginRequest, UserResponse, security::SecurityLevel},
+    models::{CreateUserRequest, GeoLocation, LoginRequest, UserResponse, security::SecurityLevel},
     errors::{AppError, Result},
 };
 
@@ -592,7 +592,7 @@ pub async fn login(
     let security_level = if combined_risk_score > 0.7 {
         SecurityLevel::High
     } else if combined_risk_score > 0.4 {
-        SecurityLevel::Standard
+        SecurityLevel::Medium
     } else {
         SecurityLevel::Low
     };
@@ -647,8 +647,8 @@ pub async fn login(
     }
 
     // Generate PASETO tokens with embedded session ID (hybrid approach)
-    let access_token = paseto_manager.generate_access_token_with_session(&user.id.to_string(), &session.id)?;
-    let refresh_token = paseto_manager.generate_refresh_token(&user.id.to_string())?;
+    let access_token = paseto_manager.generate_access_token(&user.id.to_string(), &session.id)?;
+    let refresh_token = paseto_manager.generate_refresh_token(&user.id.to_string(), &session.id)?;
 
     // Create secure HTTP-only cookies
     let access_cookie = create_secure_cookie(ACCESS_TOKEN_COOKIE, &access_token, 15 * 60); // 15 minutes
@@ -691,8 +691,16 @@ pub async fn refresh_token(
         .value();
 
     let claims = paseto_manager.validate_token(refresh_token)?;
+    
+    // Extract session ID from refresh token if available (before moving claims.sub)
+    let session_id = claims.get_claim::<String>("sid").unwrap_or(None);
     let user_id = claims.sub;
-    let new_access_token = paseto_manager.generate_access_token(&user_id)?;
+    
+    let new_access_token = if let Some(session_id) = session_id {
+        paseto_manager.generate_access_token(&user_id, &session_id)?
+    } else {
+        return Err(AppError::Unauthorized);
+    };
 
     let access_cookie = create_secure_cookie(ACCESS_TOKEN_COOKIE, &new_access_token, 15 * 60);
     let jar = jar.add(access_cookie);
